@@ -8,4 +8,4 @@ license = "MIT OR Apache-2.0"
 anyhow = "1.0.79"
 bevy = "0.12"
 quick-xml = "0.31"
-bevy_ecss = { path="../bevy_ecss" }
+bevy_ecss = { git = "https://github.com/robtfm/bevy_ecss", branch = "main" }
