@@ -1,0 +1,170 @@
+<define-template id="simple-ui">
+    <div id="ui-root" style="
+        width: 100%; 
+        height: 100%;
+        justify-content: space-between;
+        background-color: black;
+    ">
+        <!-- left panel -->
+        <div id="left-border" style="
+            width: 200px;
+            height: 100%;
+            border: 2px;
+            background-color: #a5a5a5;
+        ">
+            <div id="left-bg" style="
+                width: 100%;
+                height: 100%;
+                align-items: flex-end;
+                background-color: #262626;
+            ">
+                <div id="left-text" style="
+                    font: 'fonts/FiraSans-Bold.ttf';
+                    font-size: 30px;
+                    color: white;
+                ">
+                    Text Example
+                </div>
+            </div>
+        </div>
+
+        <!-- right panel with list -->
+        <div id="right-border" style="
+            flex-direction: column-reverse;
+            justify-content: center;
+            width: 200px;
+            height: 100%;
+            background-color: #262626;
+        ">
+            <div id="right-bg" style="
+                height: 25px;
+                margin: 0px auto 0px auto;
+                font: 'fonts/FiraSans-Bold.ttf';
+                font-size: 25px;
+                color: white;
+            ">
+                Scrolling List
+            </div>
+            <div id="right-list" style="
+                flex-direction: column-reverse;
+                align-self: center;
+                width: 100%;
+                height: 50%;
+                overflow-y: hidden;
+                background-color: #191919;
+            ">
+                <div id="right-moving-panel" style="
+                    flex-direction: column-reverse; 
+                    flex-grow: 1;
+                    background-color: #00000000;
+                ">
+                    <div id="right-item-0" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 0</div>
+                    <div id="right-item-1" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 1</div>
+                    <div id="right-item-2" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 2</div>
+                    <div id="right-item-3" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 3</div>
+                    <div id="right-item-4" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 4</div>
+                    <div id="right-item-5" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 5</div>
+                    <div id="right-item-6" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 6</div>
+                    <div id="right-item-7" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 7</div>
+                    <div id="right-item-8" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 8</div>
+                    <div id="right-item-9" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 9</div>
+                    <div id="right-item-10" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 10</div>
+                    <div id="right-item-11" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 11</div>
+                    <div id="right-item-12" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 12</div>
+                    <div id="right-item-13" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 13</div>
+                    <div id="right-item-14" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 14</div>
+                    <div id="right-item-15" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 15</div>
+                    <div id="right-item-16" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 16</div>
+                    <div id="right-item-17" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 17</div>
+                    <div id="right-item-18" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 18</div>
+                    <div id="right-item-19" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 19</div>
+                    <div id="right-item-20" class="big-text" style="font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white; flex-shrink: 0; height: 20px; margin: 0px auto 0px auto;">Item 20</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- blue square -->
+        <div id="mid-blue-border" style="
+            width: 200px;
+            height: 200px;
+            position-type: absolute;
+            left: 210px;
+            bottom: 10px;
+            border: 20px;
+            background-color: #6666ff;
+        ">
+            <div id="mid-navy-blue-content" style="
+                width: 100%;
+                height: 100%;
+                background-color: #ccccff;
+            " />
+        </div>
+
+        <!-- middle squares -->
+        <div id="mid-red-last" class="blue-bg container" style="
+            width: 100%;
+            height: 100%;
+            position-type: absolute;
+            align-items: center;
+            justify-content: center;
+            background-color: #00000000;
+        ">
+            <div id="mid-red-last-but-one" style="
+                width: 100px;
+                height: 100px;
+                background-color: #ff0000;
+            ">
+                <div id="mid-red-center" style="
+                    width: 100px;
+                    height: 100px;
+                    position-type: absolute;
+                    left: 20px;
+                    bottom: 20px;
+                    background-color: #ff4c4c;
+                " />
+
+                <div id="mid-red-top-but-one" class="blue-bg" style="
+                    width: 100px;
+                    height: 100px;
+                    position-type: absolute;
+                    left: 40px;
+                    bottom: 40px;
+                    background-color: #ff4848;
+                " />
+
+                <div id="mid-red-top" style="
+                    width: 100px;
+                    height: 100px;
+                    position-type: absolute;
+                    left: 60px;
+                    bottom: 60px;
+                    background-color: #ffb2b2;
+                " />      
+
+                <div id="mid-red-alpha" class="blue-bg" style="
+                    width: 100px;
+                    height: 100px;
+                    position-type: absolute;
+                    left: 80px;
+                    bottom: 80px;
+                    background-color: #ffe5e566;
+                " />
+            </div>
+        </div>
+
+        <!-- bevy logo -->
+        <div id="mid-bevy-logo-bg" style="
+            width: 100%;
+            height: 100%;
+            position-type: absolute;
+            justify-content: center;
+            align-items: flex-end;
+            background-color: #00000000;
+        ">
+            <div id="mid-bevy-logo-image" style="
+                width: 500px; 
+                image-path: 'branding/bevy_logo_dark_big.png';
+            " />
+        </div>
+    </div>
+</define-template>
