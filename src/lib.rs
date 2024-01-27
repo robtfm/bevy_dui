@@ -661,7 +661,7 @@ impl DuiLoader {
             match &ev {
                 quick_xml::events::Event::Eof => {
                     if !template.is_empty() {
-                        panic!()
+                        return Err(anyhow!("malformed template"));
                     }
 
                     return Ok(None);
