@@ -85,6 +85,10 @@ impl DuiProps {
         self.props.remove(key)
     }
 
+    fn borrow_untyped(&self, key: &str) -> Option<&Box<dyn Any>> {
+        self.props.get(key)
+    }
+
     fn extend(&mut self, other: DuiProps) {
         self.props.extend(other.props)
     }
@@ -146,10 +150,52 @@ impl DuiNode {
         match elt {
             DuiElt::Node(NodeData {
                 id,
-                components,
+                mut components,
                 prop_components,
                 children,
             }) => {
+                // apply any @prop style components
+                let mut style_props = HashMap::default();
+                for (k, v) in prop_components.iter().filter_map(|(k, v)| match k {
+                    PropComponent::StyleAttr(s) => Some((s, v)),
+                    _ => None,
+                }) {
+                    if let Some(prop) = props.borrow::<String>(v)? {
+                        style_props.insert(k.to_owned(), prop.clone());
+                    }
+                }
+
+                if !style_props.is_empty() {
+                    let content = format!(
+                        "#inline {{{}}}",
+                        style_props
+                            .into_iter()
+                            .map(|(k, v)| format!("{k}: {v}; "))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    );
+                    let ss = bevy_ecss::StyleSheetAsset::parse("", &content);
+                    let mut world = World::new();
+                    let ent = world.spawn_empty().id();
+                    for rule in ss.iter() {
+                        for (key, value) in rule.properties.iter() {
+                            if !DuiLoader::apply_props(
+                                key,
+                                value,
+                                &mut world,
+                                ent,
+                                dui_registry.asset_server(),
+                                &mut components,
+                                &mut None,
+                            ) {
+                                panic!("this shouldn't be possible: {key} missing");
+                            } else {
+                                debug!("applied {} -> {:?}", key, value);
+                            }
+                        }
+                    }
+                }
+
                 for (ty, component) in components.iter() {
                     match ty {
                         ty if ty == &TypeId::of::<Text>() => {
@@ -157,18 +203,35 @@ impl DuiNode {
                             text_component.apply(component.as_ref());
                             if let Some(key) = prop_components.get(&PropComponent::Text) {
                                 text_component.sections[0].value =
-                                    props.take::<String>(key)?.unwrap_or_default();
+                                    props.borrow::<String>(key)?.cloned().unwrap_or_default();
                             }
-                            debug!("added text_component");
+                            debug!(
+                                "added text_component '{}'",
+                                text_component.sections[0].value
+                            );
                             commands.insert(text_component);
                         }
                         ty if ty == &TypeId::of::<UiImage>() => {
                             let mut ui_component = UiImage::default();
                             ui_component.apply(component.as_ref());
                             if let Some(key) = prop_components.get(&PropComponent::Image) {
-                                ui_component.texture = dui_registry
-                                    .asset_server()
-                                    .load(props.take::<String>(key)?.unwrap_or_default());
+                                if let Some(untyped) = props.borrow_untyped(key) {
+                                    if let Some(path) = untyped.downcast_ref::<String>() {
+                                        ui_component.texture =
+                                            dui_registry.asset_server().load(path);
+                                    } else if let Some(path) = untyped.downcast_ref::<&str>() {
+                                        ui_component.texture =
+                                            dui_registry.asset_server().load(path.to_owned());
+                                    } else if let Some(handle) =
+                                        untyped.downcast_ref::<Handle<Image>>()
+                                    {
+                                        ui_component.texture = handle.clone();
+                                    } else {
+                                        warn!("prop image type not recognised, expected String, &str or Handle<Image> (`{key}`)");
+                                    }
+                                } else {
+                                    warn!("prop image not found (`{key}`)");
+                                }
                             }
                             debug!("added ui_image component");
                             commands.insert(ui_component);
@@ -331,11 +394,11 @@ pub enum PropValue {
     Prop(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum PropComponent {
     Text,
     Image,
-    Template,
+    StyleAttr(String),
 }
 
 #[derive(Default)]
@@ -388,7 +451,7 @@ impl Clone for DuiElt {
 }
 
 macro_rules! apply_prop {
-    ($key:ident, $value:ident, $world:ident, $asset_server:ident, $components:ident, $T:ty) => {
+    ($key:ident, $value:ident, $world:ident, $asset_server:ident, $components:ident, $prop_components:ident, $T:ty) => {
         if $key == <$T>::name() {
             let mut queue = CommandQueue::default();
             let mut commands = Commands::new(&mut queue, $world);
@@ -396,11 +459,21 @@ macro_rules! apply_prop {
                 let val = <<<$T as Property>::Components as std::ops::Deref>::Target as Default>::default();
                 Box::new(val).into_reflect()
             });
-            let target = reflected_component.as_any_mut().downcast_mut().unwrap();
+            let target = if let Some(target) = reflected_component.as_any_mut().downcast_mut() {
+                target
+            } else {
+                let mut new_value = <<<$T as Property>::Components as std::ops::Deref>::Target as Default>::default();
+                new_value.apply(reflected_component.as_ref());
+                *reflected_component = Box::new(new_value).into_reflect();
+                reflected_component.as_any_mut().downcast_mut().unwrap()
+            };
             let mut ta = Tick::new(0);
             let mut tb = Tick::new(0);
             let mut_wrapper = Mut::new(target, &mut ta, &mut tb, Tick::new(0), Tick::new(0));
-            if let Ok(val) = <$T as Property>::parse($value) {
+            if matches!($value.first(), Some(bevy_ecss::PropertyToken::String(s)) if s.starts_with('@')) {
+                let bevy_ecss::PropertyToken::String(s)= $value.first().unwrap() else { panic!() };
+                $prop_components.as_mut().unwrap().insert(PropComponent::StyleAttr($key.to_owned()), s[1..].to_owned());
+            } else if let Ok(val) = <$T as Property>::parse($value) {
                 <$T>::apply(&val, mut_wrapper, $asset_server, &mut commands);
             } else {
                 warn!("failed to parse {} property value {:?}", std::any::type_name::<$T>(), $value);
@@ -447,43 +520,44 @@ impl DuiLoader {
         e: Entity,
         a: &AssetServer,
         c: &mut BTreeMap<TypeId, Box<dyn Reflect>>,
+        p: &mut Option<&mut HashMap<PropComponent, String>>,
     ) -> bool {
         use bevy_ecss::property::impls::*;
 
-        apply_prop!(k, v, w, a, c, DisplayProperty)
-            || apply_prop!(k, v, w, a, c, PositionTypeProperty)
-            || apply_prop!(k, v, w, a, c, DirectionProperty)
-            || apply_prop!(k, v, w, a, c, FlexDirectionProperty)
-            || apply_prop!(k, v, w, a, c, FlexWrapProperty)
-            || apply_prop!(k, v, w, a, c, AlignItemsProperty)
-            || apply_prop!(k, v, w, a, c, AlignSelfProperty)
-            || apply_prop!(k, v, w, a, c, AlignContentProperty)
-            || apply_prop!(k, v, w, a, c, JustifyContentProperty)
-            || apply_prop!(k, v, w, a, c, OverflowAxisXProperty)
-            || apply_prop!(k, v, w, a, c, OverflowAxisYProperty)
-            || apply_prop!(k, v, w, a, c, LeftProperty)
-            || apply_prop!(k, v, w, a, c, RightProperty)
-            || apply_prop!(k, v, w, a, c, TopProperty)
-            || apply_prop!(k, v, w, a, c, BottomProperty)
-            || apply_prop!(k, v, w, a, c, WidthProperty)
-            || apply_prop!(k, v, w, a, c, HeightProperty)
-            || apply_prop!(k, v, w, a, c, MinWidthProperty)
-            || apply_prop!(k, v, w, a, c, MinHeightProperty)
-            || apply_prop!(k, v, w, a, c, MaxWidthProperty)
-            || apply_prop!(k, v, w, a, c, MaxHeightProperty)
-            || apply_prop!(k, v, w, a, c, FlexBasisProperty)
-            || apply_prop!(k, v, w, a, c, FlexGrowProperty)
-            || apply_prop!(k, v, w, a, c, FlexShrinkProperty)
-            || apply_prop!(k, v, w, a, c, AspectRatioProperty)
-            || apply_prop!(k, v, w, a, c, MarginProperty)
-            || apply_prop!(k, v, w, a, c, PaddingProperty)
-            || apply_prop!(k, v, w, a, c, BorderProperty)
-            || apply_prop!(k, v, w, a, c, FontColorProperty)
-            || apply_prop!(k, v, w, a, c, FontProperty)
-            || apply_prop!(k, v, w, a, c, FontSizeProperty)
-            || apply_prop!(k, v, w, a, c, TextAlignProperty)
-            || apply_prop!(k, v, w, a, c, TextContentProperty)
-            || apply_prop!(k, v, w, a, c, ImageProperty)
+        apply_prop!(k, v, w, a, c, p, DisplayProperty)
+            || apply_prop!(k, v, w, a, c, p, PositionTypeProperty)
+            || apply_prop!(k, v, w, a, c, p, DirectionProperty)
+            || apply_prop!(k, v, w, a, c, p, FlexDirectionProperty)
+            || apply_prop!(k, v, w, a, c, p, FlexWrapProperty)
+            || apply_prop!(k, v, w, a, c, p, AlignItemsProperty)
+            || apply_prop!(k, v, w, a, c, p, AlignSelfProperty)
+            || apply_prop!(k, v, w, a, c, p, AlignContentProperty)
+            || apply_prop!(k, v, w, a, c, p, JustifyContentProperty)
+            || apply_prop!(k, v, w, a, c, p, OverflowAxisXProperty)
+            || apply_prop!(k, v, w, a, c, p, OverflowAxisYProperty)
+            || apply_prop!(k, v, w, a, c, p, LeftProperty)
+            || apply_prop!(k, v, w, a, c, p, RightProperty)
+            || apply_prop!(k, v, w, a, c, p, TopProperty)
+            || apply_prop!(k, v, w, a, c, p, BottomProperty)
+            || apply_prop!(k, v, w, a, c, p, WidthProperty)
+            || apply_prop!(k, v, w, a, c, p, HeightProperty)
+            || apply_prop!(k, v, w, a, c, p, MinWidthProperty)
+            || apply_prop!(k, v, w, a, c, p, MinHeightProperty)
+            || apply_prop!(k, v, w, a, c, p, MaxWidthProperty)
+            || apply_prop!(k, v, w, a, c, p, MaxHeightProperty)
+            || apply_prop!(k, v, w, a, c, p, FlexBasisProperty)
+            || apply_prop!(k, v, w, a, c, p, FlexGrowProperty)
+            || apply_prop!(k, v, w, a, c, p, FlexShrinkProperty)
+            || apply_prop!(k, v, w, a, c, p, AspectRatioProperty)
+            || apply_prop!(k, v, w, a, c, p, MarginProperty)
+            || apply_prop!(k, v, w, a, c, p, PaddingProperty)
+            || apply_prop!(k, v, w, a, c, p, BorderProperty)
+            || apply_prop!(k, v, w, a, c, p, FontColorProperty)
+            || apply_prop!(k, v, w, a, c, p, FontProperty)
+            || apply_prop!(k, v, w, a, c, p, FontSizeProperty)
+            || apply_prop!(k, v, w, a, c, p, TextAlignProperty)
+            || apply_prop!(k, v, w, a, c, p, TextContentProperty)
+            || apply_prop!(k, v, w, a, c, p, ImageProperty)
             || apply_entity_prop!(k, v, w, a, e, c, BackgroundColorProperty, BackgroundColor)
             || apply_entity_prop!(k, v, w, a, e, c, BorderColorProperty, BorderColor)
     }
@@ -574,6 +648,7 @@ impl DuiLoader {
                                 ent,
                                 asset_server,
                                 components,
+                                &mut Some(prop_components),
                             ) {
                                 warn!("unmatched style property {key}");
                             }
@@ -586,6 +661,10 @@ impl DuiLoader {
                         prop_components.insert(
                             PropComponent::Image,
                             String::from_utf8_lossy(&attr.value[1..]).into_owned(),
+                        );
+                        components.insert(
+                            TypeId::of::<UiImage>(),
+                            Box::new(UiImage::new(Handle::default())).into_reflect(),
                         );
                     } else {
                         let image =
@@ -622,7 +701,11 @@ impl DuiLoader {
                         Box::new(ZIndex::Local(index)).into_reflect(),
                     );
                 }
-                _ => bail!("unexpected attribute {:?} @ {}", attr.key.as_ref(), pos),
+                _ => warn!(
+                    "unexpected attribute {} @ {}",
+                    String::from_utf8_lossy(attr.key.as_ref()),
+                    pos
+                ),
             }
         }
 

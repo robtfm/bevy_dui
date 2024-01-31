@@ -135,31 +135,32 @@ impl DuiTemplate for MyListComponent {
             })
             .with_children(|c| {
                 for (i, item) in items.into_iter().enumerate() {
-                    let id = c.spawn(
-                        TextBundle::from_section(
-                            format!("{item}"),
-                            TextStyle {
-                                font: dui.asset_server().load("fonts/FiraSans-Bold.ttf"),
-                                font_size: 20.,
-                                color: Color::WHITE,
-                            },
-                        )
-                        .with_style(Style {
-                            flex_shrink: 0.,
-                            height: Val::Px(20.),
-                            margin: UiRect {
-                                left: Val::Auto,
-                                right: Val::Auto,
+                    let id = c
+                        .spawn(
+                            TextBundle::from_section(
+                                format!("{item}"),
+                                TextStyle {
+                                    font: dui.asset_server().load("fonts/FiraSans-Bold.ttf"),
+                                    font_size: 20.,
+                                    color: Color::WHITE,
+                                },
+                            )
+                            .with_style(Style {
+                                flex_shrink: 0.,
+                                height: Val::Px(20.),
+                                margin: UiRect {
+                                    left: Val::Auto,
+                                    right: Val::Auto,
+                                    ..default()
+                                },
                                 ..default()
-                            },
-                            ..default()
-                        }),
-                    )
+                            }),
+                        )
                         .insert(bevy_ecss::Class::new("big-text"))
                         .insert(Name::new(format!("item-{}", i)))
                         .id();
 
-                        results.insert(format!("item-{}", i), id);
+                    results.insert(format!("item-{}", i), id);
                 }
             });
         Ok(results)
