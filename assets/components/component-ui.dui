@@ -133,7 +133,7 @@
             position-type: absolute;
             justify-content: center;
             align-items: flex-end;
-            background-color: #00000000;
+            background-color: '@bird-background';
         ">
             <div id="mid-bevy-logo-image" style="width: 500px; image-path: 'branding/bevy_logo_dark_big.png';" />
         </div>

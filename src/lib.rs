@@ -55,14 +55,28 @@ impl DuiProps {
     /// returns Err(e) if the key is found but the value is not of the expected type.
     ///
     /// returns Ok(None) if the key is not found.
-    pub fn borrow<T: 'static>(&mut self, key: &str) -> Result<Option<&T>, anyhow::Error> {
-        self.props
-            .get(key)
-            .map(|b| {
-                b.downcast_ref()
-                    .ok_or_else(|| anyhow!("property {key} is not of type {}", type_name::<T>()))
-            })
+    pub fn borrow<'a, T: 'static>(
+        &'a mut self,
+        key: &str,
+        dui: &'a DuiRegistry,
+    ) -> Result<Option<&'a T>, anyhow::Error> {
+        if let Some(local_prop) = self.props.get(key) {
+            Some(
+                local_prop
+                    .downcast_ref()
+                    .ok_or_else(|| anyhow!("property {key} is not of type {}", type_name::<T>())),
+            )
             .transpose()
+        } else {
+            dui.default_props
+                .get(key)
+                .map(|b| {
+                    b.downcast_ref().ok_or_else(|| {
+                        anyhow!("property {key} is not of type {}", type_name::<T>())
+                    })
+                })
+                .transpose()
+        }
     }
 
     /// returns Ok(Some(value)) if the key is found and the value is of the correct type.
@@ -85,8 +99,16 @@ impl DuiProps {
         self.props.remove(key)
     }
 
-    fn borrow_untyped(&self, key: &str) -> Option<&Box<dyn Any>> {
-        self.props.get(key)
+    fn borrow_untyped(&self, key: &str, dui: &DuiRegistry) -> Option<&Box<dyn Any>> {
+        if let Some(val) = self.props.get(key) {
+            Some(val)
+        } else {
+            // SAFETY: i can't find anything that says this is really safe
+            // normally you can safely coerce Box<dyn Any + Send> to Box<dyn Any>
+            // but here we have &Box<dyn Any + Send> and want &Box<dyn Any>
+            // maybe i could return an enum? or just not use this func and use the typed api
+            dui.default_props.get(key).map(|val| unsafe { std::mem::transmute(val) })
+        }
     }
 
     fn extend(&mut self, other: DuiProps) {
@@ -143,7 +165,7 @@ impl DuiNode {
         commands: &mut EntityCommands,
         iter: &mut impl Iterator<Item = DuiElt>,
         props: &mut DuiProps,
-        dui_registry: &DuiRegistry,
+        dui: &DuiRegistry,
     ) -> Result<NodeMap, anyhow::Error> {
         let elt = iter.next().ok_or(anyhow!("unexpected end of iterator"))?;
 
@@ -160,7 +182,7 @@ impl DuiNode {
                     PropComponent::StyleAttr(s) => Some((s, v)),
                     _ => None,
                 }) {
-                    if let Some(prop) = props.borrow::<String>(v)? {
+                    if let Some(prop) = props.borrow::<String>(v, dui)? {
                         style_props.insert(k.to_owned(), prop.clone());
                     }
                 }
@@ -184,7 +206,7 @@ impl DuiNode {
                                 value,
                                 &mut world,
                                 ent,
-                                dui_registry.asset_server(),
+                                dui.asset_server(),
                                 &mut components,
                                 &mut None,
                             ) {
@@ -202,26 +224,24 @@ impl DuiNode {
                             let mut text_component = Text::default();
                             text_component.apply(component.as_ref());
                             if let Some(key) = prop_components.get(&PropComponent::Text) {
-                                text_component.sections[0].value =
-                                    props.borrow::<String>(key)?.cloned().unwrap_or_default();
+                                text_component.sections[0].value = props
+                                    .borrow::<String>(key, dui)?
+                                    .cloned()
+                                    .unwrap_or_default();
                             }
-                            debug!(
-                                "added text_component '{}'",
-                                text_component.sections[0].value
-                            );
+                            debug!("added text_component '{:?}'", text_component);
                             commands.insert(text_component);
                         }
                         ty if ty == &TypeId::of::<UiImage>() => {
                             let mut ui_component = UiImage::default();
                             ui_component.apply(component.as_ref());
                             if let Some(key) = prop_components.get(&PropComponent::Image) {
-                                if let Some(untyped) = props.borrow_untyped(key) {
+                                if let Some(untyped) = props.borrow_untyped(key, dui) {
                                     if let Some(path) = untyped.downcast_ref::<String>() {
-                                        ui_component.texture =
-                                            dui_registry.asset_server().load(path);
+                                        ui_component.texture = dui.asset_server().load(path);
                                     } else if let Some(path) = untyped.downcast_ref::<&str>() {
                                         ui_component.texture =
-                                            dui_registry.asset_server().load(path.to_owned());
+                                            dui.asset_server().load(path.to_owned());
                                     } else if let Some(handle) =
                                         untyped.downcast_ref::<Handle<Image>>()
                                     {
@@ -251,7 +271,7 @@ impl DuiNode {
                 let mut result = Ok(HashMap::from_iter(id.map(|id| (id.clone(), commands.id()))));
                 commands.with_children(|c| {
                     for _ in 0..children {
-                        match Self::render_inner(&mut c.spawn_empty(), iter, props, dui_registry) {
+                        match Self::render_inner(&mut c.spawn_empty(), iter, props, dui) {
                             Ok(components) => {
                                 result.as_mut().unwrap().extend(components);
                             }
@@ -274,12 +294,12 @@ impl DuiNode {
                 let template = match &template {
                     PropValue::Literal(val) => val,
                     PropValue::Prop(key) => props
-                        .borrow::<String>(key)?
+                        .borrow::<String>(key, dui)?
                         .ok_or_else(|| anyhow!("missing property for template {key}"))?,
                 };
                 debug!("[{template}]");
 
-                let component = dui_registry
+                let component = dui
                     .templates
                     .get(template)
                     .ok_or(anyhow!("missing component registry for `{template}`"))?;
@@ -311,7 +331,7 @@ impl DuiNode {
                 };
 
                 let component_id = commands.id();
-                let mut result = component.render(commands, props_ref, dui_registry);
+                let mut result = component.render(commands, props_ref, dui);
                 match &mut result {
                     Ok(ref mut components) => {
                         if let Some(id) = id.as_ref() {
@@ -342,6 +362,7 @@ impl DuiTemplate for DuiNode {
 #[derive(Resource)]
 pub struct DuiRegistry {
     templates: HashMap<String, Box<dyn DuiTemplate>>,
+    default_props: HashMap<String, Box<dyn Any + Send + Sync + 'static>>,
     asset_server: AssetServer,
 }
 
@@ -350,6 +371,7 @@ impl FromWorld for DuiRegistry {
         let asset_server = world.resource::<AssetServer>().clone();
         Self {
             templates: default(),
+            default_props: Default::default(),
             asset_server,
         }
     }
@@ -372,15 +394,29 @@ impl DuiRegistry {
         template: &str,
         mut props: impl AsMut<DuiProps>,
     ) -> Result<DuiEntities, anyhow::Error> {
+        debug!(
+            "applying template {template} with props: {:?}",
+            props.as_mut().props.keys()
+        );
+
         let named_nodes = self
             .templates
             .get(template)
             .ok_or(anyhow!("template `{template}` not found"))?
             .render(commands, props.as_mut(), self)?;
+
         Ok(DuiEntities {
             root: commands.id(),
             named_nodes,
         })
+    }
+
+    pub fn set_default_prop<C: Clone + Send + Sync + 'static>(
+        &mut self,
+        key: impl Into<String>,
+        val: C,
+    ) {
+        self.default_props.insert(key.into(), Box::new(val));
     }
 
     pub fn asset_server(&self) -> &AssetServer {
@@ -486,12 +522,25 @@ macro_rules! apply_prop {
 }
 
 macro_rules! apply_entity_prop {
-    ($key:ident, $value:ident, $world:ident, $asset_server:ident, $entity:ident, $components:ident, $T:ty, $C:ty) => {
+    ($key:ident, $value:ident, $world:ident, $asset_server:ident, $entity:ident, $components:ident, $prop_components:ident, $T:ty, $C:ty) => {
         if $key == <$T>::name() {
             let mut queue = CommandQueue::default();
             let mut commands = Commands::new(&mut queue, $world);
-            if let Ok(val) = <$T as Property>::parse($value) {
+            if matches!($value.first(), Some(bevy_ecss::PropertyToken::String(s)) if s.starts_with('@')) {
+                let bevy_ecss::PropertyToken::String(s)= $value.first().unwrap() else { panic!() };
+                $prop_components.as_mut().unwrap().insert(PropComponent::StyleAttr($key.to_owned()), s[1..].to_owned());
+                $components.insert(
+                    TypeId::of::<$C>(),
+                    Box::<$C>::default().into_reflect(),
+                );
+            } else if let Ok(val) = <$T as Property>::parse($value) {
                 <$T>::apply(&val, $entity, $asset_server, &mut commands);
+                queue.apply($world);
+                let component = $world.get::<$C>($entity).unwrap();
+                $components.insert(
+                    TypeId::of::<$C>(),
+                    Box::new(component.clone()).into_reflect(),
+                );
             } else {
                 warn!(
                     "failed to parse {} property value {:?}",
@@ -499,12 +548,6 @@ macro_rules! apply_entity_prop {
                     $value
                 );
             };
-            queue.apply($world);
-            let component = $world.get::<$C>($entity).unwrap();
-            $components.insert(
-                TypeId::of::<$C>(),
-                Box::new(component.clone()).into_reflect(),
-            );
             true
         } else {
             false
@@ -558,8 +601,18 @@ impl DuiLoader {
             || apply_prop!(k, v, w, a, c, p, TextAlignProperty)
             || apply_prop!(k, v, w, a, c, p, TextContentProperty)
             || apply_prop!(k, v, w, a, c, p, ImageProperty)
-            || apply_entity_prop!(k, v, w, a, e, c, BackgroundColorProperty, BackgroundColor)
-            || apply_entity_prop!(k, v, w, a, e, c, BorderColorProperty, BorderColor)
+            || apply_entity_prop!(
+                k,
+                v,
+                w,
+                a,
+                e,
+                c,
+                p,
+                BackgroundColorProperty,
+                BackgroundColor
+            )
+            || apply_entity_prop!(k, v, w, a, e, c, p, BorderColorProperty, BorderColor)
     }
 
     fn node_from_attrs(

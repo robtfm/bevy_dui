@@ -70,8 +70,22 @@ fn load_assets(asset_server: Res<AssetServer>, mut tracker: ResMut<StateTracker<
     tracker.load_asset(asset_server.load_folder("components"));
 }
 
+pub trait ColorHexEx {
+    fn to_hex_color(&self) -> String;
+}
+
+impl ColorHexEx for Color {
+    fn to_hex_color(&self) -> String {
+        let color = self.as_rgba_u8();
+        let res = format!("#{:02x}{:02x}{:02x}{:02x}", color[0], color[1], color[2], color[3]);
+        println!("{res}");
+        res
+    }
+}
+
 fn register_components(mut registry: ResMut<DuiRegistry>) {
     registry.register_template("list", MyListComponent);
+    registry.set_default_prop("bird-background", Color::rgba(1.0, 0.0, 0.0, 0.2).to_hex_color());
 }
 
 #[derive(Component)]
