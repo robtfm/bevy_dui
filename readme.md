@@ -90,19 +90,18 @@ z-index | optional | `z-index="3"` adds a `ZIndex(3)` component.
 
 ### `<component>`
 
-spawns a new entity and applies another named template on it.
+spawns a new entity and applies another named template on it. the template name is taken from the element name.
 
 #### attributes:
 
 tag | type | description
 --- | --- | ---
-template | required | specifies the name of the template to include. may be linked to a property with an @-prefixed value.
 id | optional | identifies the entity in the `DuiEntities` struct returned from `apply_template` and `spawn_template` calls
 passthrough | optional | specifies that all properties available to this template should be passed to the called template.
 other properties | optional | will be passed to the referenced template as properties. may be linked to a property with an @-prefixed value.
 
 ```html
-    <component template="dialog" title="Confirm" body="@message" ok-action="@ok-action" />
+    <dialog title="Confirm" body="@message" ok-action="@ok-action" />
 ```
 
 creates an entity and applies the `dialog` template, with the `title` property set to "Confirm", `body` property set to input the `message` property and the `ok-action` set to the input `ok-action` property.

@@ -104,6 +104,7 @@ impl DuiProps {
             .transpose()
     }
 
+    /// renders any child elements of the xml tag in the dui file as children of (or applied to, for <apply />) the given entity.
     pub fn apply_children(
         &mut self,
         target: &mut EntityCommands,
