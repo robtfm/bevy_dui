@@ -22,9 +22,19 @@ use std::{
 };
 
 /// pass properties into templates
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct DuiProps {
     props: HashMap<String, Box<dyn Any>>,
+    render_children: Option<(Vec<DuiElt>, Vec<ChildType>)>,
+}
+
+impl std::fmt::Debug for DuiProps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DuiProps")
+            .field("props", &self.props)
+            .field("apply_children", &self.render_children.is_some())
+            .finish()
+    }
 }
 
 impl AsMut<DuiProps> for DuiProps {
@@ -47,11 +57,8 @@ impl DuiProps {
         self.props.insert(key.into(), Box::new(value));
     }
 
-    fn insert_prop_untyped(&mut self, key: impl Into<String>, value: Box<dyn Any>) {
-        self.props.insert(key.into(), value);
-    }
-
     /// returns Ok(Some(&value)) if the key is found and the value is of the correct type.
+    /// borrow can be used to borrow default/global properties as well as non-default properties.
     ///
     /// returns Err(e) if the key is found but the value is not of the expected type.
     ///
@@ -81,6 +88,7 @@ impl DuiProps {
     }
 
     /// returns Ok(Some(value)) if the key is found and the value is of the correct type.
+    /// take can only be used to take non-default/global properties.
     ///
     /// returns Err(e) if the key is found but the value is not of the expected type.
     ///
@@ -94,6 +102,40 @@ impl DuiProps {
                     .map_err(|_| anyhow!("property {key} is not of type {}", type_name::<T>()))
             })
             .transpose()
+    }
+
+    pub fn apply_children(
+        &mut self,
+        target: &mut EntityCommands,
+        dui: &DuiRegistry,
+    ) -> Result<NodeMap, anyhow::Error> {
+        let Some((elts, children)) = self.render_children.take() else {
+            bail!("apply children out of context");
+        };
+
+        let mut iter = elts.into_iter();
+
+        let mut results = HashMap::default();
+        for child_type in &children {
+            let components = match child_type {
+                ChildType::SpawnNew => {
+                    let mut node = target.commands().spawn_empty();
+                    let res = DuiNode::render_inner(&mut node, &mut iter, self, dui)?;
+                    let id = node.id();
+                    target.push_children(&[id]);
+                    res
+                }
+                ChildType::ApplyToParent => DuiNode::render_inner(target, &mut iter, self, dui)?,
+            };
+
+            results.extend(components);
+        }
+
+        Ok(results)
+    }
+
+    fn insert_prop_untyped(&mut self, key: impl Into<String>, value: Box<dyn Any>) {
+        self.props.insert(key.into(), value);
     }
 
     fn take_untyped(&mut self, key: &str) -> Option<Box<dyn Any>> {
@@ -178,132 +220,124 @@ impl DuiNode {
         props: &mut DuiProps,
         dui: &DuiRegistry,
     ) -> Result<NodeMap, anyhow::Error> {
-        let elt = iter.next().ok_or(anyhow!("unexpected end of iterator"))?;
+        let DuiElt {
+            id,
+            template,
+            properties,
+            passthrough,
+            mut components,
+            prop_components,
+            children,
+        } = iter.next().ok_or(anyhow!("unexpected end of iterator"))?;
 
-        match elt {
-            DuiElt::Node(NodeData {
-                id,
-                mut components,
-                prop_components,
-                children,
-            }) => {
-                // apply any @prop style components
-                let mut style_props = HashMap::default();
-                for (k, v) in prop_components.iter().filter_map(|(k, v)| match k {
-                    PropComponent::StyleAttr(s) => Some((s, v)),
-                    _ => None,
-                }) {
-                    if let Some(prop) = props.borrow::<String>(v, dui)? {
-                        style_props.insert(k.to_owned(), prop.clone());
-                    }
-                }
-
-                if !style_props.is_empty() {
-                    let content = format!(
-                        "#inline {{{}}}",
-                        style_props
-                            .into_iter()
-                            .map(|(k, v)| format!("{k}: {v}; "))
-                            .collect::<Vec<_>>()
-                            .join("")
-                    );
-                    let ss = bevy_ecss::StyleSheetAsset::parse("", &content);
-                    let mut world = World::new();
-                    let ent = world.spawn_empty().id();
-                    for rule in ss.iter() {
-                        for (key, value) in rule.properties.iter() {
-                            if !DuiLoader::apply_props(
-                                key,
-                                value,
-                                &mut world,
-                                ent,
-                                dui.asset_server(),
-                                &mut components,
-                                &mut None,
-                            ) {
-                                panic!("this shouldn't be possible: {key} missing");
-                            } else {
-                                debug!("applied {} -> {:?}", key, value);
-                            }
-                        }
-                    }
-                }
-
-                for (ty, component) in components.iter() {
-                    match ty {
-                        ty if ty == &TypeId::of::<Text>() => {
-                            let mut text_component = Text::default();
-                            text_component.apply(component.as_ref());
-                            if let Some(key) = prop_components.get(&PropComponent::Text) {
-                                text_component.sections[0].value = props
-                                    .borrow::<String>(key, dui)?
-                                    .cloned()
-                                    .unwrap_or_default();
-                            }
-                            debug!("added text_component '{:?}'", text_component);
-                            commands.insert(text_component);
-                        }
-                        ty if ty == &TypeId::of::<UiImage>() => {
-                            let mut ui_component = UiImage::default();
-                            ui_component.apply(component.as_ref());
-                            if let Some(key) = prop_components.get(&PropComponent::Image) {
-                                if let Some(untyped) = props.borrow_untyped(key, dui) {
-                                    if let Some(path) = untyped.downcast_ref::<String>() {
-                                        ui_component.texture = dui.asset_server().load(path);
-                                    } else if let Some(path) = untyped.downcast_ref::<&str>() {
-                                        ui_component.texture =
-                                            dui.asset_server().load(path.to_owned());
-                                    } else if let Some(handle) =
-                                        untyped.downcast_ref::<Handle<Image>>()
-                                    {
-                                        ui_component.texture = handle.clone();
-                                    } else {
-                                        warn!("prop image type not recognised, expected String, &str or Handle<Image> (`{key}`)");
-                                    }
-                                } else {
-                                    warn!("prop image not found (`{key}`)");
-                                }
-                            }
-                            debug!("added ui_image component");
-                            commands.insert(ui_component);
-                        }
-                        _ => {
-                            debug!(
-                                "added reflect component of type {}",
-                                Reflect::get_represented_type_info(component.as_ref())
-                                    .unwrap()
-                                    .type_path()
-                            );
-                            commands.insert_reflect(component.clone_value());
-                        }
-                    }
-                }
-
-                let mut result = Ok(HashMap::from_iter(id.map(|id| (id.clone(), commands.id()))));
-
-                for child in &children {
-                    let components = match child {
-                        ChildType::SpawnNew => {
-                            let mut node = commands.commands().spawn_empty();
-                            let res = Self::render_inner(&mut node, iter, props, dui)?;
-                            let id = node.id();
-                            commands.push_children(&[id]);
-                            res
-                        }
-                        ChildType::ApplyToParent => Self::render_inner(commands, iter, props, dui)?,
-                    };
-
-                    result.as_mut().unwrap().extend(components);
-                }
-
-                result
+        // apply any @prop style components
+        let mut style_props = HashMap::default();
+        for (k, v) in prop_components.iter().filter_map(|(k, v)| match k {
+            PropComponent::StyleAttr(s) => Some((s, v)),
+            _ => None,
+        }) {
+            if let Some(prop) = props.borrow::<String>(v, dui)? {
+                style_props.insert(k.to_owned(), prop.clone());
             }
-            DuiElt::Component {
-                id,
-                template,
-                properties,
-                passthrough,
-            } => {
+        }
+
+        if !style_props.is_empty() {
+            let content = format!(
+                "#inline {{{}}}",
+                style_props
+                    .into_iter()
+                    .map(|(k, v)| format!("{k}: {v}; "))
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+            let ss = bevy_ecss::StyleSheetAsset::parse("", &content);
+            let mut world = World::new();
+            let ent = world.spawn_empty().id();
+            for rule in ss.iter() {
+                for (key, value) in rule.properties.iter() {
+                    if !DuiLoader::apply_props(
+                        key,
+                        value,
+                        &mut world,
+                        ent,
+                        dui.asset_server(),
+                        &mut components,
+                        &mut None,
+                    ) {
+                        panic!("this shouldn't be possible: {key} missing");
+                    } else {
+                        debug!("applied {} -> {:?}", key, value);
+                    }
+                }
+            }
+        }
+
+        for (ty, component) in components.iter() {
+            match ty {
+                ty if ty == &TypeId::of::<Text>() => {
+                    let mut text_component = Text::default();
+                    text_component.apply(component.as_ref());
+                    if let Some(key) = prop_components.get(&PropComponent::Text) {
+                        text_component.sections[0].value = props
+                            .borrow::<String>(key, dui)?
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                    debug!("added text_component '{:?}'", text_component);
+                    commands.insert(text_component);
+                }
+                ty if ty == &TypeId::of::<UiImage>() => {
+                    let mut ui_component = UiImage::default();
+                    ui_component.apply(component.as_ref());
+                    if let Some(key) = prop_components.get(&PropComponent::Image) {
+                        if let Some(untyped) = props.borrow_untyped(key, dui) {
+                            if let Some(path) = untyped.downcast_ref::<String>() {
+                                ui_component.texture = dui.asset_server().load(path);
+                            } else if let Some(path) = untyped.downcast_ref::<&str>() {
+                                ui_component.texture = dui.asset_server().load(path.to_owned());
+                            } else if let Some(handle) = untyped.downcast_ref::<Handle<Image>>() {
+                                ui_component.texture = handle.clone();
+                            } else {
+                                warn!("prop image type not recognised, expected String, &str or Handle<Image> (`{key}`)");
+                            }
+                        } else {
+                            warn!("prop image not found (`{key}`)");
+                        }
+                    }
+                    debug!("added ui_image component");
+                    commands.insert(ui_component);
+                }
+                _ => {
+                    debug!(
+                        "added reflect component of type {}",
+                        Reflect::get_represented_type_info(component.as_ref())
+                            .unwrap()
+                            .type_path()
+                    );
+                    commands.insert_reflect(component.clone_value());
+                }
+            }
+        }
+
+        let mut elts_required = children.len();
+        let mut child_elts = Vec::default();
+        while elts_required > 0 {
+            let Some(elt) = iter.next() else {
+                error!(
+                    "need {} children, but none left! vec looks like: {:?}",
+                    elts_required, child_elts
+                );
+                panic!();
+            };
+            elts_required += elt.children.len();
+            child_elts.push(elt);
+            elts_required -= 1;
+        }
+
+        props.render_children = Some((child_elts, children));
+        let mut results = match template {
+            None => props.apply_children(commands, dui),
+            Some(template) => {
                 let template = match &template {
                     PropValue::Literal(val) => val,
                     PropValue::Prop(key) => props
@@ -340,22 +374,24 @@ impl DuiNode {
                     props.extend(component_props);
                     props
                 } else {
+                    component_props.render_children = props.render_children.take();
                     &mut component_props
                 };
 
-                let component_id = commands.id();
-                let mut result = component.render(commands, props_ref, dui);
-                match &mut result {
-                    Ok(ref mut components) => {
-                        if let Some(id) = id.as_ref() {
-                            components.insert(id.clone(), component_id);
-                        }
-                    }
-                    Err(_) => (),
-                };
-                result
+                let mut res = component.render(commands, props_ref, dui)?;
+                if props_ref.render_children.is_some() {
+                    debug!(
+                        "adding {} children to component",
+                        props_ref.render_children.as_ref().unwrap().0.len()
+                    );
+                    res.extend(props_ref.apply_children(commands, dui)?);
+                }
+                Ok(res)
             }
-        }
+        }?;
+
+        results.extend(id.map(|id| (id.clone(), commands.id())));
+        Ok(results)
     }
 }
 
@@ -437,70 +473,48 @@ impl DuiRegistry {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum PropValue {
     Literal(String),
     Prop(String),
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PropComponent {
     Text,
     Image,
     StyleAttr(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ChildType {
     SpawnNew,
     ApplyToParent,
 }
 
-#[derive(Default)]
-pub struct NodeData {
+#[derive(Default, Debug)]
+pub struct DuiElt {
     id: Option<String>,
+    template: Option<PropValue>,
+    properties: HashMap<String, PropValue>,
+    passthrough: bool,
     components: BTreeMap<TypeId, Box<dyn Reflect>>,
     prop_components: HashMap<PropComponent, String>,
     children: Vec<ChildType>,
 }
 
-pub enum DuiElt {
-    Node(NodeData),
-    Component {
-        id: Option<String>,
-        template: PropValue,
-        properties: HashMap<String, PropValue>,
-        passthrough: bool,
-    },
-}
-
 impl Clone for DuiElt {
     fn clone(&self) -> Self {
-        match self {
-            Self::Node(NodeData {
-                id,
-                components,
-                prop_components,
-                children,
-            }) => Self::Node(NodeData {
-                id: id.clone(),
-                components: BTreeMap::from_iter(
-                    components.iter().map(|(k, v)| (*k, v.clone_value())),
-                ),
-                prop_components: prop_components.clone(),
-                children: children.to_vec(),
-            }),
-            Self::Component {
-                id,
-                template,
-                properties,
-                passthrough,
-            } => Self::Component {
-                id: id.clone(),
-                template: template.clone(),
-                properties: properties.clone(),
-                passthrough: *passthrough,
-            },
+        Self {
+            id: self.id.clone(),
+            template: self.template.clone(),
+            properties: self.properties.clone(),
+            passthrough: self.passthrough,
+            components: BTreeMap::from_iter(
+                self.components.iter().map(|(k, v)| (*k, v.clone_value())),
+            ),
+            prop_components: self.prop_components.clone(),
+            children: self.children.clone(),
         }
     }
 }
@@ -638,9 +652,10 @@ impl DuiLoader {
         e: &quick_xml::events::BytesStart,
         pos: usize,
         asset_server: &AssetServer,
-        node_data: &mut NodeData,
+        node_data: &mut DuiElt,
+        is_div: bool,
     ) -> Result<(), anyhow::Error> {
-        let NodeData {
+        let DuiElt {
             ref mut components,
             ref mut id,
             ref mut prop_components,
@@ -773,11 +788,15 @@ impl DuiLoader {
                         Box::new(ZIndex::Local(index)).into_reflect(),
                     );
                 }
-                _ => warn!(
-                    "unexpected attribute {} @ {}",
-                    String::from_utf8_lossy(attr.key.as_ref()),
-                    pos
-                ),
+                _ => {
+                    if is_div {
+                        warn!(
+                            "unexpected attribute {} @ {}",
+                            String::from_utf8_lossy(attr.key.as_ref()),
+                            pos
+                        )
+                    }
+                }
             }
         }
 
@@ -837,11 +856,14 @@ impl DuiLoader {
                             (None, ChildType::SpawnNew)
                         }
                         b"div" => {
-                            let mut node_data = NodeData::default();
+                            let mut elt = DuiElt {
+                                passthrough: true,
+                                ..Default::default()
+                            };
                             if matches!(ev, quick_xml::events::Event::Empty(_)) {
-                                Self::node_from_attrs(e, pos, asset_server, &mut node_data)?
+                                Self::node_from_attrs(e, pos, asset_server, &mut elt, true)?
                             }
-                            (Some(DuiElt::Node(node_data)), ChildType::SpawnNew)
+                            (Some(elt), ChildType::SpawnNew)
                         }
                         b"apply" | b"component" => {
                             let child_type = if e.name().as_ref() == b"apply" {
@@ -885,11 +907,12 @@ impl DuiLoader {
                                 .map(|attr| String::from_utf8_lossy(&attr.value).into_owned());
                             let passthrough = e.try_get_attribute("passthrough")?.is_some();
                             (
-                                Some(DuiElt::Component {
+                                Some(DuiElt {
                                     id,
-                                    template: target,
+                                    template: Some(target),
                                     properties,
                                     passthrough,
+                                    ..Default::default()
                                 }),
                                 child_type,
                             )
@@ -899,12 +922,11 @@ impl DuiLoader {
                     ensure!(!template.is_empty());
 
                     if let Some((ix, _)) = open_elts.last() {
-                        match elts[*ix] {
-                            Some(DuiElt::Node(NodeData {
-                                ref mut children, ..
-                            })) => children.push(childtype),
-                            None => (),
-                            _ => bail!("unexpected child element @ {pos}"),
+                        if let Some(DuiElt {
+                            ref mut children, ..
+                        }) = elts[*ix]
+                        {
+                            children.push(childtype)
                         }
                     }
 
@@ -916,9 +938,9 @@ impl DuiLoader {
                 }
 
                 quick_xml::events::Event::Text(e) => {
-                    let Some(Some(DuiElt::Node(NodeData {
+                    let Some(Some(DuiElt {
                         ref mut components, ..
-                    }))) = elts.last_mut()
+                    })) = elts.last_mut()
                     else {
                         bail!("text not expected here @ {}", pos);
                     };
@@ -946,7 +968,7 @@ impl DuiLoader {
 
                 quick_xml::events::Event::End(_) => {
                     let (ix, e) = open_elts.pop().ok_or(anyhow!("close without open"))?;
-                    let Some(DuiElt::Node(ref mut node_data)) = elts[ix] else {
+                    let Some(ref mut elt) = elts[ix] else {
                         // closing the define-template
                         let None = elts.remove(0) else {
                             panic!();
@@ -956,7 +978,7 @@ impl DuiLoader {
                             nodes: elts.into_iter().map(Option::unwrap).collect(),
                         }));
                     };
-                    Self::node_from_attrs(&e, pos, asset_server, node_data)?;
+                    Self::node_from_attrs(&e, pos, asset_server, elt, false)?;
                 }
 
                 // skip

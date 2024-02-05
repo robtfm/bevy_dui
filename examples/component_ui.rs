@@ -80,12 +80,10 @@ pub trait ColorHexEx {
 impl ColorHexEx for Color {
     fn to_hex_color(&self) -> String {
         let color = self.as_rgba_u8();
-        let res = format!(
+        format!(
             "#{:02x}{:02x}{:02x}{:02x}",
             color[0], color[1], color[2], color[3]
-        );
-        println!("{res}");
-        res
+        )
     }
 }
 
@@ -152,7 +150,10 @@ impl DuiTemplate for MyListComponent {
         dui: &DuiRegistry,
     ) -> Result<NodeMap, anyhow::Error> {
         let items = props.take::<Vec<String>>("items")?.unwrap_or_default();
-        let mut results = NodeMap::default();
+        // we can apply children at any point in the execution on any entity. here we add them first to the root.
+        // if we don't ever apply children, they are appended to the root on return
+        let mut results = props.apply_children(commands, dui)?;
+
         commands
             .insert(NodeBundle {
                 style: Style {

@@ -53,7 +53,9 @@
                 overflow-y: hidden;
                 background-color: #191919;
             ">
-                <component template="list" items="@list-items" id="rl-component" />
+                <component template="list" items="@list-items" id="rl-component">
+                    <div text="child defined in dui" class="big-text" id="item-minus 1" style="flex-shrink: 0; height: 20px; margin: 0px auto 0px auto; font: 'fonts/FiraSans-Bold.ttf'; font-size: 20px; color: white;" />
+                </component>
             </div>
         </div>
 
