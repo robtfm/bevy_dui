@@ -18,6 +18,7 @@ use bevy_ecss::{Property, PropertyValues};
 use std::{
     any::{type_name, Any, TypeId},
     collections::BTreeMap,
+    marker::PhantomData,
 };
 
 /// pass properties into templates
@@ -107,7 +108,9 @@ impl DuiProps {
             // normally you can safely coerce Box<dyn Any + Send> to Box<dyn Any>
             // but here we have &Box<dyn Any + Send> and want &Box<dyn Any>
             // maybe i could return an enum? or just not use this func and use the typed api
-            dui.default_props.get(key).map(|val| unsafe { std::mem::transmute(val) })
+            dui.default_props
+                .get(key)
+                .map(|val| unsafe { std::mem::transmute(val) })
         }
     }
 
@@ -143,6 +146,14 @@ impl DuiEntities {
 
 /// trait for custom component implementations
 pub trait DuiTemplate: Send + Sync {
+    /// should including the template create a new node?
+    /// The root template is always applied onto a new entity.
+    /// if true, when nested the template is applied to a new entity spawned in the parent,
+    /// if false, the template is applied directly on the existing node.
+    fn create_node(&self) -> bool {
+        true
+    }
+
     fn render(
         &self,
         commands: &mut EntityCommands,
@@ -269,19 +280,21 @@ impl DuiNode {
                 }
 
                 let mut result = Ok(HashMap::from_iter(id.map(|id| (id.clone(), commands.id()))));
-                commands.with_children(|c| {
-                    for _ in 0..children {
-                        match Self::render_inner(&mut c.spawn_empty(), iter, props, dui) {
-                            Ok(components) => {
-                                result.as_mut().unwrap().extend(components);
-                            }
-                            Err(e) => {
-                                result = Err(e);
-                                return;
-                            }
+
+                for child in &children {
+                    let components = match child {
+                        ChildType::SpawnNew => {
+                            let mut node = commands.commands().spawn_empty();
+                            let res = Self::render_inner(&mut node, iter, props, dui)?;
+                            let id = node.id();
+                            commands.push_children(&[id]);
+                            res
                         }
-                    }
-                });
+                        ChildType::ApplyToParent => Self::render_inner(commands, iter, props, dui)?,
+                    };
+
+                    result.as_mut().unwrap().extend(components);
+                }
 
                 result
             }
@@ -437,12 +450,18 @@ pub enum PropComponent {
     StyleAttr(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildType {
+    SpawnNew,
+    ApplyToParent,
+}
+
 #[derive(Default)]
 pub struct NodeData {
     id: Option<String>,
     components: BTreeMap<TypeId, Box<dyn Reflect>>,
     prop_components: HashMap<PropComponent, String>,
-    children: usize,
+    children: Vec<ChildType>,
 }
 
 pub enum DuiElt {
@@ -469,7 +488,7 @@ impl Clone for DuiElt {
                     components.iter().map(|(k, v)| (*k, v.clone_value())),
                 ),
                 prop_components: prop_components.clone(),
-                children: *children,
+                children: children.to_vec(),
             }),
             Self::Component {
                 id,
@@ -804,7 +823,7 @@ impl DuiLoader {
                 }
 
                 quick_xml::events::Event::Empty(e) | quick_xml::events::Event::Start(e) => {
-                    let elt = match e.name().as_ref() {
+                    let (elt, childtype) = match e.name().as_ref() {
                         b"define-template" => {
                             ensure!(template.is_empty());
                             template = String::from_utf8_lossy(
@@ -815,16 +834,22 @@ impl DuiLoader {
                                     .value,
                             )
                             .into_owned();
-                            None
+                            (None, ChildType::SpawnNew)
                         }
                         b"div" => {
                             let mut node_data = NodeData::default();
                             if matches!(ev, quick_xml::events::Event::Empty(_)) {
                                 Self::node_from_attrs(e, pos, asset_server, &mut node_data)?
                             }
-                            Some(DuiElt::Node(node_data))
+                            (Some(DuiElt::Node(node_data)), ChildType::SpawnNew)
                         }
-                        b"component" => {
+                        b"apply" | b"component" => {
+                            let child_type = if e.name().as_ref() == b"apply" {
+                                ChildType::ApplyToParent
+                            } else {
+                                ChildType::SpawnNew
+                            };
+
                             let target_val = &e
                                 .try_get_attribute("template")?
                                 .ok_or(anyhow!(
@@ -859,12 +884,15 @@ impl DuiLoader {
                                 .try_get_attribute("id")?
                                 .map(|attr| String::from_utf8_lossy(&attr.value).into_owned());
                             let passthrough = e.try_get_attribute("passthrough")?.is_some();
-                            Some(DuiElt::Component {
-                                id,
-                                template: target,
-                                properties,
-                                passthrough,
-                            })
+                            (
+                                Some(DuiElt::Component {
+                                    id,
+                                    template: target,
+                                    properties,
+                                    passthrough,
+                                }),
+                                child_type,
+                            )
                         }
                         _ => bail!("unexpected tag {e:?} @ {pos}"),
                     };
@@ -874,7 +902,7 @@ impl DuiLoader {
                         match elts[*ix] {
                             Some(DuiElt::Node(NodeData {
                                 ref mut children, ..
-                            })) => *children += 1,
+                            })) => children.push(childtype),
                             None => (),
                             _ => bail!("unexpected child element @ {pos}"),
                         }
@@ -1080,5 +1108,71 @@ impl<'w, 's, 'a> DuiEntityCommandsExt for EntityCommands<'w, 's, 'a> {
         props: impl AsMut<DuiProps>,
     ) -> Result<DuiEntities, anyhow::Error> {
         registry.apply_template(self, template, props)
+    }
+}
+
+pub struct DuiComponentFromClone<C: Component + Clone>(String, PhantomData<fn() -> C>);
+impl<C: Component + Clone> DuiComponentFromClone<C> {
+    pub fn new(prop_name: impl Into<String>) -> Self {
+        Self(prop_name.into(), PhantomData)
+    }
+}
+impl<C: Component + Clone> DuiTemplate for DuiComponentFromClone<C> {
+    fn render(
+        &self,
+        commands: &mut EntityCommands,
+        props: &mut DuiProps,
+        dui_registry: &DuiRegistry,
+    ) -> Result<NodeMap, anyhow::Error> {
+        let component = props
+            .borrow::<C>(&self.0, dui_registry)?
+            .ok_or(anyhow::anyhow!("no value provided"))?;
+        commands.insert(component.clone());
+        Ok(Default::default())
+    }
+}
+
+pub struct DuiComponentFromValue<C: Component, V>(String, PhantomData<fn() -> (C, V)>);
+
+impl<C: Component, V: 'static> DuiComponentFromValue<C, V> {
+    pub fn new(prop_name: impl Into<String>) -> Self {
+        Self(prop_name.into(), PhantomData)
+    }
+}
+
+impl<C: Component, V: 'static> DuiTemplate for DuiComponentFromValue<C, V>
+where
+    C: for<'a> TryFrom<&'a V>,
+    for<'a> <C as TryFrom<&'a V>>::Error: std::fmt::Display,
+{
+    fn render(
+        &self,
+        commands: &mut EntityCommands,
+        props: &mut DuiProps,
+        dui_registry: &DuiRegistry,
+    ) -> Result<NodeMap, anyhow::Error> {
+        let value_str = props.borrow::<V>(&self.0, dui_registry)?;
+        let component = value_str
+            .map(|v| C::try_from(v))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or(anyhow::anyhow!("missing value property"))?;
+        commands.insert(component);
+        Ok(Default::default())
+    }
+}
+
+#[derive(Default)]
+pub struct DuiMarkerComponent<C: Component + Default>(PhantomData<fn() -> C>);
+
+impl<C: Component + Default> DuiTemplate for DuiMarkerComponent<C> {
+    fn render(
+        &self,
+        commands: &mut EntityCommands,
+        _: &mut DuiProps,
+        _: &DuiRegistry,
+    ) -> Result<NodeMap, anyhow::Error> {
+        commands.insert(C::default());
+        Ok(Default::default())
     }
 }

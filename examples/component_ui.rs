@@ -4,7 +4,10 @@ use bevy::{
     prelude::*,
     utils::HashSet,
 };
-use bevy_dui::{DuiEntityCommandsExt, DuiPlugin, DuiProps, DuiRegistry, DuiTemplate, NodeMap};
+use bevy_dui::{
+    DuiEntityCommandsExt, DuiMarkerComponent, DuiPlugin, DuiProps, DuiRegistry, DuiTemplate,
+    NodeMap,
+};
 // use bevy_dui::{Component, Css};
 use std::marker::PhantomData;
 
@@ -77,7 +80,10 @@ pub trait ColorHexEx {
 impl ColorHexEx for Color {
     fn to_hex_color(&self) -> String {
         let color = self.as_rgba_u8();
-        let res = format!("#{:02x}{:02x}{:02x}{:02x}", color[0], color[1], color[2], color[3]);
+        let res = format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            color[0], color[1], color[2], color[3]
+        );
         println!("{res}");
         res
     }
@@ -85,10 +91,14 @@ impl ColorHexEx for Color {
 
 fn register_components(mut registry: ResMut<DuiRegistry>) {
     registry.register_template("list", MyListComponent);
-    registry.set_default_prop("bird-background", Color::rgba(1.0, 0.0, 0.0, 0.2).to_hex_color());
+    registry.register_template("toggle-vis", DuiMarkerComponent::<ToggleVis>::default());
+    registry.set_default_prop(
+        "bird-background",
+        Color::rgba(1.0, 0.0, 0.0, 0.2).to_hex_color(),
+    );
 }
 
-#[derive(Component)]
+#[derive(Component, Default)]
 pub struct ToggleVis;
 
 fn show_ui(mut commands: Commands, asset_server: Res<AssetServer>, dui: Res<DuiRegistry>) {
@@ -109,12 +119,17 @@ fn show_ui(mut commands: Commands, asset_server: Res<AssetServer>, dui: Res<DuiR
         .unwrap();
 
     // we can add our own components to named nodes
-    commands
-        .entity(components.named("mid-red-last"))
-        .insert(ToggleVis);
+    // <apply template="toggle-vis" />
     commands
         .entity(components.named("rl-component"))
         .insert(ToggleVis);
+
+    // they can also be applied via DuiMarkerComponent or DuiValueComponent in the .dui file
+    //      <apply template="toggle-vis" />
+    //
+    // commands
+    //     .entity(components.named("mid-red-last"))
+    //     .insert(ToggleVis);
 }
 
 fn toggle_vis(mut q: Query<&mut Visibility, With<ToggleVis>>, time: Res<Time>) {

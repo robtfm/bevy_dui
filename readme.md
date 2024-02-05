@@ -90,7 +90,7 @@ z-index | optional | `z-index="3"` adds a `ZIndex(3)` component.
 
 ### `<component>`
 
-embeds another template component.
+spawns a new entity and applies another named template on it.
 
 #### attributes:
 
@@ -106,6 +106,20 @@ other properties | optional | will be passed to the referenced template as prope
 ```
 
 creates an entity and applies the `dialog` template, with the `title` property set to "Confirm", `body` property set to input the `message` property and the `ok-action` set to the input `ok-action` property.
+
+### `<apply>`
+
+applies some custom code on the containing entity. helpers `DuiMarkerComponent` and `DuiValueComponent` can be used to support adding arbitrary components onto entities. see the `toggle-vis` template in the component_ui example.
+
+tag | type | description
+--- | --- | ---
+template | required | specifies the name of the template to apply. may be linked to a property with an @-prefixed value.
+passthrough | optional | specifies that all properties available to this template should be passed to the called template.
+other properties | optional | will be passed to the referenced template as properties. may be linked to a property with an @-prefixed value.
+
+```html
+    <apply template="my-apply-template" />
+```
 
 ## todo
 
