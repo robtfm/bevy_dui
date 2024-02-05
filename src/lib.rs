@@ -865,25 +865,29 @@ impl DuiLoader {
                             }
                             (Some(elt), ChildType::SpawnNew)
                         }
-                        b"apply" | b"component" => {
-                            let child_type = if e.name().as_ref() == b"apply" {
-                                ChildType::ApplyToParent
+                        _ => {
+                            let (child_type, target_val) = if e.name().as_ref() == b"apply" {
+                                (
+                                    ChildType::ApplyToParent,
+                                    e.try_get_attribute("template")?
+                                        .ok_or(anyhow!(
+                                            "define-template must have a `template` attribute @ {pos}"
+                                        ))?
+                                        .value
+                                        .into_owned()
+                                )
                             } else {
-                                ChildType::SpawnNew
+                                (ChildType::SpawnNew, e.name().as_ref().to_owned())
                             };
 
-                            let target_val = &e
-                                .try_get_attribute("template")?
-                                .ok_or(anyhow!(
-                                    "define-template must have a `template` attribute @ {pos}"
-                                ))?
-                                .value;
                             let target = if target_val.starts_with(b"@") {
                                 PropValue::Prop(
                                     String::from_utf8_lossy(&target_val[1..]).into_owned(),
                                 )
                             } else {
-                                PropValue::Literal(String::from_utf8_lossy(target_val).into_owned())
+                                PropValue::Literal(
+                                    String::from_utf8_lossy(&target_val).into_owned(),
+                                )
                             };
                             let properties = HashMap::from_iter(
                                 e.attributes().flat_map(|a| a.ok()).map(|attr| {
@@ -917,7 +921,6 @@ impl DuiLoader {
                                 child_type,
                             )
                         }
-                        _ => bail!("unexpected tag {e:?} @ {pos}"),
                     };
                     ensure!(!template.is_empty());
 
