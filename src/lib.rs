@@ -25,14 +25,12 @@ use std::{
 #[derive(Default)]
 pub struct DuiProps {
     props: HashMap<String, Box<dyn Any>>,
-    render_children: Vec<(Vec<DuiElt>, Vec<ChildType>)>,
 }
 
 impl std::fmt::Debug for DuiProps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DuiProps")
             .field("props", &self.props)
-            .field("apply_children", &self.render_children.len())
             .finish()
     }
 }
@@ -64,9 +62,9 @@ impl DuiProps {
     ///
     /// returns Ok(None) if the key is not found.
     pub fn borrow<'a, T: 'static>(
-        &'a mut self,
+        &'a self,
         key: &str,
-        dui: &'a DuiRegistry,
+        ctx: &'a DuiContext,
     ) -> Result<Option<&'a T>, anyhow::Error> {
         if let Some(local_prop) = self.props.get(key) {
             Some(
@@ -76,7 +74,8 @@ impl DuiProps {
             )
             .transpose()
         } else {
-            dui.default_props
+            ctx.registry()
+                .default_props
                 .get(key)
                 .map(|b| {
                     b.downcast_ref().ok_or_else(|| {
@@ -104,48 +103,6 @@ impl DuiProps {
             .transpose()
     }
 
-    /// renders any child elements of the xml tag in the dui file as children of (or applied to, for <apply />) the given entity.
-    pub fn apply_children(
-        &mut self,
-        target: &mut EntityCommands,
-        dui: &DuiRegistry,
-    ) -> Result<NodeMap, anyhow::Error> {
-        let Some((elts, children)) = self.render_children.pop() else {
-            bail!("apply children out of context");
-        };
-
-        let mut iter = elts.into_iter();
-        self.apply_children_inner(target, dui, &mut iter, children)
-    }
-
-    fn apply_children_inner(
-        &mut self,
-        target: &mut EntityCommands,
-        dui: &DuiRegistry,
-        iter: &mut impl Iterator<Item=DuiElt>,
-        children: Vec<ChildType>,
-    ) -> Result<NodeMap, anyhow::Error> {
-        let mut results = HashMap::default();
-        let root_id = target.id();
-        for child_type in &children {
-            let components = match child_type {
-                ChildType::SpawnNew => {
-                    let mut node = target.commands().spawn_empty();
-                    debug!("[{:?}] spawned child [{:?}]", root_id, node.id());
-                    let res = DuiNode::render_inner(&mut node, iter, self, dui)?;
-                    let id = node.id();
-                    target.push_children(&[id]);
-                    res
-                }
-                ChildType::ApplyToParent => DuiNode::render_inner(target, iter, self, dui)?,
-            };
-
-            results.extend(components);
-        }
-
-        Ok(results)
-    }
-
     fn insert_prop_untyped(&mut self, key: impl Into<String>, value: Box<dyn Any>) {
         self.props.insert(key.into(), value);
     }
@@ -154,7 +111,7 @@ impl DuiProps {
         self.props.remove(key)
     }
 
-    fn borrow_untyped(&self, key: &str, dui: &DuiRegistry) -> Option<&Box<dyn Any>> {
+    fn borrow_untyped(&self, key: &str, ctx: &DuiContext) -> Option<&Box<dyn Any>> {
         if let Some(val) = self.props.get(key) {
             Some(val)
         } else {
@@ -162,14 +119,11 @@ impl DuiProps {
             // normally you can safely coerce Box<dyn Any + Send> to Box<dyn Any>
             // but here we have &Box<dyn Any + Send> and want &Box<dyn Any>
             // maybe i could return an enum? or just not use this func and use the typed api
-            dui.default_props
+            ctx.registry()
+                .default_props
                 .get(key)
                 .map(|val| unsafe { std::mem::transmute(val) })
         }
-    }
-
-    fn extend(&mut self, other: DuiProps) {
-        self.props.extend(other.props)
     }
 }
 
@@ -200,19 +154,11 @@ impl DuiEntities {
 
 /// trait for custom component implementations
 pub trait DuiTemplate: Send + Sync {
-    /// should including the template create a new node?
-    /// The root template is always applied onto a new entity.
-    /// if true, when nested the template is applied to a new entity spawned in the parent,
-    /// if false, the template is applied directly on the existing node.
-    fn create_node(&self) -> bool {
-        true
-    }
-
     fn render(
         &self,
         commands: &mut EntityCommands,
-        props: &mut DuiProps,
-        dui_registry: &DuiRegistry,
+        props: DuiProps,
+        ctx: &mut DuiContext,
     ) -> Result<NodeMap, anyhow::Error>;
 }
 
@@ -229,9 +175,9 @@ impl DuiNode {
     fn render_inner(
         commands: &mut EntityCommands,
         iter: &mut impl Iterator<Item = DuiElt>,
-        props: &mut DuiProps,
-        dui: &DuiRegistry,
-    ) -> Result<NodeMap, anyhow::Error> {
+        mut props: DuiProps,
+        ctx: &mut DuiContext,
+    ) -> Result<(NodeMap, DuiProps), anyhow::Error> {
         let DuiElt {
             id,
             template,
@@ -241,11 +187,20 @@ impl DuiNode {
             children,
         } = iter.next().ok_or(anyhow!("unexpected end of iterator"))?;
 
-        debug!("[{:?}] render inner [{:?}] [children: {:?}]", commands.id(), template, props.render_children.iter().map(|rc| format!("{}", rc.1.len())).collect::<Vec<_>>().join(", "));
+        debug!(
+            "[{:?}] render inner [{:?}] [children: {:?}]",
+            commands.id(),
+            template,
+            ctx.children
+                .iter()
+                .map(|rc| format!("{}", rc.1.len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
         if matches!(&template, Some(PropValue::Literal(n)) if n.as_str() == "apply-children") {
             debug!("[{:?}] applying children", commands.id());
-            return props.apply_children(commands, dui);
+            return Ok((ctx.apply_children(commands)?, props));
         };
 
         // apply any @prop style components
@@ -254,7 +209,7 @@ impl DuiNode {
             PropComponent::StyleAttr(s) => Some((s, v)),
             _ => None,
         }) {
-            if let Some(prop) = props.borrow::<String>(v, dui)? {
+            if let Some(prop) = props.borrow::<String>(v, ctx)? {
                 style_props.insert(k.to_owned(), prop.clone());
             }
         }
@@ -278,7 +233,7 @@ impl DuiNode {
                         value,
                         &mut world,
                         ent,
-                        dui.asset_server(),
+                        ctx.asset_server(),
                         &mut components,
                         &mut None,
                     ) {
@@ -297,7 +252,7 @@ impl DuiNode {
                     text_component.apply(component.as_ref());
                     if let Some(key) = prop_components.get(&PropComponent::Text) {
                         text_component.sections[0].value = props
-                            .borrow::<String>(key, dui)?
+                            .borrow::<String>(key, ctx)?
                             .cloned()
                             .unwrap_or_default();
                     }
@@ -308,11 +263,11 @@ impl DuiNode {
                     let mut ui_component = UiImage::default();
                     ui_component.apply(component.as_ref());
                     if let Some(key) = prop_components.get(&PropComponent::Image) {
-                        if let Some(untyped) = props.borrow_untyped(key, dui) {
+                        if let Some(untyped) = props.borrow_untyped(key, ctx) {
                             if let Some(path) = untyped.downcast_ref::<String>() {
-                                ui_component.texture = dui.asset_server().load(path);
+                                ui_component.texture = ctx.asset_server().load(path);
                             } else if let Some(path) = untyped.downcast_ref::<&str>() {
-                                ui_component.texture = dui.asset_server().load(path.to_owned());
+                                ui_component.texture = ctx.asset_server().load(path.to_owned());
                             } else if let Some(handle) = untyped.downcast_ref::<Handle<Image>>() {
                                 ui_component.texture = handle.clone();
                             } else {
@@ -339,20 +294,16 @@ impl DuiNode {
         }
 
         let mut results = match template {
-            None => props.apply_children_inner(commands, dui, iter, children),
+            None => ctx.apply_children_inner(commands, iter, children, props),
             Some(template) => {
                 let template = match &template {
                     PropValue::Literal(val) => val,
                     PropValue::Prop(key) => props
-                        .borrow::<String>(key, dui)?
+                        .borrow::<String>(key, ctx)?
                         .ok_or_else(|| anyhow!("missing property for template {key}"))?,
-                };
+                }
+                .clone();
                 debug!("[{template}]");
-
-                let component = dui
-                    .templates
-                    .get(template)
-                    .ok_or(anyhow!("missing component registry for `{template}`"))?;
 
                 let mut component_props = DuiProps::new();
                 for (k, v) in properties.iter() {
@@ -387,23 +338,37 @@ impl DuiNode {
                     child_elts.push(elt);
                     elts_required -= 1;
                 }
-        
-                let prev_children_count = props.render_children.len();
-                props.render_children.push((child_elts, children));
-                debug!("[{:?} adding template children ({:?} sets)", commands.id(), props.render_children.len());
-                props.extend(component_props);
-                let mut res = component.render(commands, props, dui)?;
-                if props.render_children.len() == prev_children_count + 1 {
-                    let (elts, children) = props.render_children.pop().unwrap();
-                    debug!("adding {} children to component", children.len());
-                    res.extend(props.apply_children_inner(commands, dui, &mut elts.into_iter(), children)?);
+
+                let prev_children_count = ctx.children.len();
+                ctx.children.push((child_elts, children, props));
+
+                // let component = ctx
+                //     .registry()
+                //     .templates
+                //     .get(&template)
+                //     .ok_or(anyhow!("missing component registry for `{template}`"))?;
+
+                debug!(
+                    "[{:?} adding template children ({:?} sets)",
+                    commands.id(),
+                    ctx.children.len()
+                );
+                let mut res = ctx.render_template(commands, &template, component_props)?;
+                if ctx.children.len() == prev_children_count + 1 {
+                    debug!(
+                        "[{:?}] automatically adding children to component",
+                        commands.id()
+                    );
+                    res.extend(ctx.apply_children(commands)?);
                 }
 
-                Ok(res)
+                let props = ctx.used_props.pop().unwrap();
+
+                Ok((res, props))
             }
         }?;
 
-        results.extend(id.map(|id| (id.clone(), commands.id())));
+        results.0.extend(id.map(|id| (id.clone(), commands.id())));
         Ok(results)
     }
 }
@@ -412,11 +377,106 @@ impl DuiTemplate for DuiNode {
     fn render(
         &self,
         commands: &mut EntityCommands,
-        props: &mut DuiProps,
-        dui_registry: &DuiRegistry,
+        props: DuiProps,
+        ctx: &mut DuiContext,
     ) -> Result<NodeMap, anyhow::Error> {
         let mut iter = self.nodes.clone().into_iter();
-        Self::render_inner(commands, &mut iter, props, dui_registry)
+        Self::render_inner(commands, &mut iter, props, ctx).map(|(nodes, _)| nodes)
+    }
+}
+
+pub struct DuiContext<'a> {
+    dui: &'a DuiRegistry,
+    children: Vec<(Vec<DuiElt>, Vec<ChildType>, DuiProps)>,
+    used_props: Vec<DuiProps>,
+}
+
+impl<'a> DuiContext<'a> {
+    pub fn registry(&self) -> &DuiRegistry {
+        self.dui
+    }
+
+    pub fn asset_server(&self) -> &AssetServer {
+        self.dui.asset_server()
+    }
+
+    pub fn apply_children(
+        &mut self,
+        target: &mut EntityCommands,
+    ) -> Result<NodeMap, anyhow::Error> {
+        let Some((elts, children, props)) = self.children.pop() else {
+            bail!("apply children out of context");
+        };
+        let mut iter = elts.into_iter();
+
+        let (named_nodes, props) = self.apply_children_inner(target, &mut iter, children, props)?;
+        self.used_props.push(props);
+        Ok(named_nodes)
+    }
+
+    fn apply_children_inner(
+        &mut self,
+        target: &mut EntityCommands,
+        iter: &mut impl Iterator<Item = DuiElt>,
+        children: Vec<ChildType>,
+        mut props: DuiProps,
+    ) -> Result<(NodeMap, DuiProps), anyhow::Error> {
+        let mut named_nodes = HashMap::default();
+        let root_id = target.id();
+
+        for child_type in &children {
+            match child_type {
+                ChildType::SpawnNew => {
+                    let mut node = target.commands().spawn_empty();
+                    debug!("[{:?}] spawned child [{:?}]", root_id, node.id());
+                    let res = DuiNode::render_inner(&mut node, iter, props, self)?;
+                    let id = node.id();
+                    target.push_children(&[id]);
+                    props = res.1;
+                    named_nodes.extend(res.0);
+                }
+                ChildType::ApplyToParent => {
+                    let res = DuiNode::render_inner(target, iter, props, self)?;
+                    props = res.1;
+                    named_nodes.extend(res.0);
+                }
+            };
+        }
+
+        Ok((named_nodes, props))
+    }
+
+    pub fn render_template(
+        &mut self,
+        target: &mut EntityCommands,
+        template: &str,
+        props: DuiProps,
+    ) -> Result<NodeMap, anyhow::Error> {
+        let component = self
+            .dui
+            .templates
+            .get(template)
+            .ok_or(anyhow!("missing component registry for `{template}`"))?;
+
+        component.render(target, props, self)
+    }
+
+    pub fn spawn_template(
+        &mut self,
+        template: &str,
+        parent: &mut ChildBuilder,
+        props: DuiProps,
+    ) -> Result<NodeMap, anyhow::Error> {
+        let component = self
+            .dui
+            .templates
+            .get(template)
+            .ok_or(anyhow!("missing component registry for `{template}`"))?;
+
+        let mut target = parent.spawn_empty();
+        let mut res = component.render(&mut target, props, self)?;
+        res.insert("root".to_owned(), target.id());
+        Ok(res)
     }
 }
 
@@ -454,7 +514,7 @@ impl DuiRegistry {
         &self,
         commands: &mut EntityCommands,
         template: &str,
-        mut props: impl AsMut<DuiProps>,
+        mut props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
         debug!(
             "[{:?}] applying template {template} with props: {:?}",
@@ -462,11 +522,17 @@ impl DuiRegistry {
             props.as_mut().props.keys()
         );
 
+        let mut ctx = DuiContext {
+            dui: self,
+            children: Default::default(),
+            used_props: Default::default(),
+        };
+
         let named_nodes = self
             .templates
             .get(template)
             .ok_or(anyhow!("template `{template}` not found"))?
-            .render(commands, props.as_mut(), self)?;
+            .render(commands, props, &mut ctx)?;
 
         Ok(DuiEntities {
             root: commands.id(),
@@ -886,7 +952,7 @@ impl DuiLoader {
                                             .value
                                             .into_owned()
                                     )
-                                } 
+                                }
                                 b"apply-children" => (ChildType::ApplyToParent, b"apply-children".to_vec()),
                                 _ => (ChildType::SpawnNew, e.name().as_ref().to_owned()),
                             };
@@ -1085,7 +1151,7 @@ pub trait DuiCommandsExt {
         &mut self,
         registry: &DuiRegistry,
         template: &str,
-        props: impl AsMut<DuiProps>,
+        props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error>;
 }
 
@@ -1094,7 +1160,7 @@ impl<'w, 's> DuiCommandsExt for Commands<'w, 's> {
         &mut self,
         registry: &DuiRegistry,
         template: &str,
-        props: impl AsMut<DuiProps>,
+        props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
         self.spawn_empty().apply_template(registry, template, props)
     }
@@ -1105,7 +1171,7 @@ impl<'w, 's, 'a> DuiCommandsExt for ChildBuilder<'w, 's, 'a> {
         &mut self,
         registry: &DuiRegistry,
         template: &str,
-        props: impl AsMut<DuiProps>,
+        props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
         let mut root = self.spawn_empty();
         registry.apply_template(&mut root, template, props)
@@ -1117,7 +1183,7 @@ pub trait DuiEntityCommandsExt {
         &mut self,
         registry: &DuiRegistry,
         template: &str,
-        props: impl AsMut<DuiProps>,
+        props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error>;
 }
 
@@ -1126,7 +1192,7 @@ impl<'w, 's, 'a> DuiCommandsExt for EntityCommands<'w, 's, 'a> {
         &mut self,
         registry: &DuiRegistry,
         template: &str,
-        props: impl AsMut<DuiProps>,
+        props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
         let results = self.commands().spawn_template(registry, template, props)?;
         self.push_children(&[results.root]);
@@ -1139,7 +1205,7 @@ impl<'w, 's, 'a> DuiEntityCommandsExt for EntityCommands<'w, 's, 'a> {
         &mut self,
         registry: &DuiRegistry,
         template: &str,
-        props: impl AsMut<DuiProps>,
+        props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
         registry.apply_template(self, template, props)
     }
@@ -1155,11 +1221,11 @@ impl<C: Component + Clone> DuiTemplate for DuiComponentFromClone<C> {
     fn render(
         &self,
         commands: &mut EntityCommands,
-        props: &mut DuiProps,
-        dui_registry: &DuiRegistry,
+        props: DuiProps,
+        ctx: &mut DuiContext,
     ) -> Result<NodeMap, anyhow::Error> {
         let component = props
-            .borrow::<C>(&self.0, dui_registry)?
+            .borrow::<C>(&self.0, ctx)?
             .ok_or(anyhow::anyhow!("no value provided"))?;
         commands.insert(component.clone());
         Ok(Default::default())
@@ -1182,10 +1248,10 @@ where
     fn render(
         &self,
         commands: &mut EntityCommands,
-        props: &mut DuiProps,
-        dui_registry: &DuiRegistry,
+        props: DuiProps,
+        ctx: &mut DuiContext,
     ) -> Result<NodeMap, anyhow::Error> {
-        let value_str = props.borrow::<V>(&self.0, dui_registry)?;
+        let value_str = props.borrow::<V>(&self.0, ctx)?;
         let component = value_str
             .map(|v| C::try_from(v))
             .transpose()
@@ -1203,8 +1269,8 @@ impl<C: Component + Default> DuiTemplate for DuiMarkerComponent<C> {
     fn render(
         &self,
         commands: &mut EntityCommands,
-        _: &mut DuiProps,
-        _: &DuiRegistry,
+        _: DuiProps,
+        _: &mut DuiContext,
     ) -> Result<NodeMap, anyhow::Error> {
         commands.insert(C::default());
         Ok(Default::default())

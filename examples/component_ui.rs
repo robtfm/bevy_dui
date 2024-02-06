@@ -5,8 +5,8 @@ use bevy::{
     utils::HashSet,
 };
 use bevy_dui::{
-    DuiEntityCommandsExt, DuiMarkerComponent, DuiPlugin, DuiProps, DuiRegistry, DuiTemplate,
-    NodeMap,
+    DuiContext, DuiEntityCommandsExt, DuiMarkerComponent, DuiPlugin, DuiProps, DuiRegistry,
+    DuiTemplate, NodeMap,
 };
 // use bevy_dui::{Component, Css};
 use std::marker::PhantomData;
@@ -146,13 +146,13 @@ impl DuiTemplate for MyListComponent {
     fn render<'w, 's, 'a>(
         &self,
         commands: &mut EntityCommands,
-        props: &mut DuiProps,
-        dui: &DuiRegistry,
+        mut props: DuiProps,
+        ctx: &mut DuiContext,
     ) -> Result<NodeMap, anyhow::Error> {
         let items = props.take::<Vec<String>>("items")?.unwrap_or_default();
         // we can apply children at any point in the execution on any entity. here we add them first to the root.
         // if we don't ever apply children, they are appended to the root on return
-        let mut results = props.apply_children(commands, dui)?;
+        let mut results = ctx.apply_children(commands)?;
 
         commands
             .insert(NodeBundle {
@@ -170,7 +170,7 @@ impl DuiTemplate for MyListComponent {
                             TextBundle::from_section(
                                 format!("{item}"),
                                 TextStyle {
-                                    font: dui.asset_server().load("fonts/FiraSans-Bold.ttf"),
+                                    font: ctx.asset_server().load("fonts/FiraSans-Bold.ttf"),
                                     font_size: 20.,
                                     color: Color::WHITE,
                                 },
