@@ -1129,7 +1129,7 @@ impl Plugin for DuiPlugin {
 fn add_duis(
     mut evs: EventReader<AssetEvent<DuiNodeList>>,
     assets: Res<Assets<DuiNodeList>>,
-    mut registry: ResMut<DuiRegistry>,
+    mut dui: ResMut<DuiRegistry>,
 ) {
     for ev in evs.read() {
         match ev {
@@ -1138,7 +1138,7 @@ fn add_duis(
                     continue;
                 };
                 for node in list.0.iter() {
-                    registry.register_template(node.template.clone(), node.clone());
+                    dui.register_template(node.template.clone(), node.clone());
                 }
             }
             _ => (),
@@ -1149,7 +1149,7 @@ fn add_duis(
 pub trait DuiCommandsExt {
     fn spawn_template(
         &mut self,
-        registry: &DuiRegistry,
+        dui: &DuiRegistry,
         template: &str,
         props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error>;
@@ -1158,30 +1158,30 @@ pub trait DuiCommandsExt {
 impl<'w, 's> DuiCommandsExt for Commands<'w, 's> {
     fn spawn_template(
         &mut self,
-        registry: &DuiRegistry,
+        dui: &DuiRegistry,
         template: &str,
         props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
-        self.spawn_empty().apply_template(registry, template, props)
+        self.spawn_empty().apply_template(dui, template, props)
     }
 }
 
 impl<'w, 's, 'a> DuiCommandsExt for ChildBuilder<'w, 's, 'a> {
     fn spawn_template(
         &mut self,
-        registry: &DuiRegistry,
+        dui: &DuiRegistry,
         template: &str,
         props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
         let mut root = self.spawn_empty();
-        registry.apply_template(&mut root, template, props)
+        dui.apply_template(&mut root, template, props)
     }
 }
 
 pub trait DuiEntityCommandsExt {
     fn apply_template(
         &mut self,
-        registry: &DuiRegistry,
+        dui: &DuiRegistry,
         template: &str,
         props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error>;
@@ -1190,11 +1190,11 @@ pub trait DuiEntityCommandsExt {
 impl<'w, 's, 'a> DuiCommandsExt for EntityCommands<'w, 's, 'a> {
     fn spawn_template(
         &mut self,
-        registry: &DuiRegistry,
+        dui: &DuiRegistry,
         template: &str,
         props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
-        let results = self.commands().spawn_template(registry, template, props)?;
+        let results = self.commands().spawn_template(dui, template, props)?;
         self.push_children(&[results.root]);
         Ok(results)
     }
@@ -1203,11 +1203,11 @@ impl<'w, 's, 'a> DuiCommandsExt for EntityCommands<'w, 's, 'a> {
 impl<'w, 's, 'a> DuiEntityCommandsExt for EntityCommands<'w, 's, 'a> {
     fn apply_template(
         &mut self,
-        registry: &DuiRegistry,
+        dui: &DuiRegistry,
         template: &str,
         props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
-        registry.apply_template(self, template, props)
+        dui.apply_template(self, template, props)
     }
 }
 
