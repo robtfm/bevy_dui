@@ -25,14 +25,14 @@ use std::{
 #[derive(Default)]
 pub struct DuiProps {
     props: HashMap<String, Box<dyn Any>>,
-    render_children: Option<(Vec<DuiElt>, Vec<ChildType>)>,
+    render_children: Vec<(Vec<DuiElt>, Vec<ChildType>)>,
 }
 
 impl std::fmt::Debug for DuiProps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DuiProps")
             .field("props", &self.props)
-            .field("apply_children", &self.render_children.is_some())
+            .field("apply_children", &self.render_children.len())
             .finish()
     }
 }
@@ -110,23 +110,34 @@ impl DuiProps {
         target: &mut EntityCommands,
         dui: &DuiRegistry,
     ) -> Result<NodeMap, anyhow::Error> {
-        let Some((elts, children)) = self.render_children.take() else {
+        let Some((elts, children)) = self.render_children.pop() else {
             bail!("apply children out of context");
         };
 
         let mut iter = elts.into_iter();
+        self.apply_children_inner(target, dui, &mut iter, children)
+    }
 
+    fn apply_children_inner(
+        &mut self,
+        target: &mut EntityCommands,
+        dui: &DuiRegistry,
+        iter: &mut impl Iterator<Item=DuiElt>,
+        children: Vec<ChildType>,
+    ) -> Result<NodeMap, anyhow::Error> {
         let mut results = HashMap::default();
+        let root_id = target.id();
         for child_type in &children {
             let components = match child_type {
                 ChildType::SpawnNew => {
                     let mut node = target.commands().spawn_empty();
-                    let res = DuiNode::render_inner(&mut node, &mut iter, self, dui)?;
+                    debug!("[{:?}] spawned child [{:?}]", root_id, node.id());
+                    let res = DuiNode::render_inner(&mut node, iter, self, dui)?;
                     let id = node.id();
                     target.push_children(&[id]);
                     res
                 }
-                ChildType::ApplyToParent => DuiNode::render_inner(target, &mut iter, self, dui)?,
+                ChildType::ApplyToParent => DuiNode::render_inner(target, iter, self, dui)?,
             };
 
             results.extend(components);
@@ -225,11 +236,17 @@ impl DuiNode {
             id,
             template,
             properties,
-            passthrough,
             mut components,
             prop_components,
             children,
         } = iter.next().ok_or(anyhow!("unexpected end of iterator"))?;
+
+        debug!("[{:?}] render inner [{:?}] [children: {:?}]", commands.id(), template, props.render_children.iter().map(|rc| format!("{}", rc.1.len())).collect::<Vec<_>>().join(", "));
+
+        if matches!(&template, Some(PropValue::Literal(n)) if n.as_str() == "apply-children") {
+            debug!("[{:?}] applying children", commands.id());
+            return props.apply_children(commands, dui);
+        };
 
         // apply any @prop style components
         let mut style_props = HashMap::default();
@@ -310,7 +327,8 @@ impl DuiNode {
                 }
                 _ => {
                     debug!(
-                        "added reflect component of type {}",
+                        "[{:?}] added reflect component of type {}",
+                        commands.id(),
                         Reflect::get_represented_type_info(component.as_ref())
                             .unwrap()
                             .type_path()
@@ -320,24 +338,8 @@ impl DuiNode {
             }
         }
 
-        let mut elts_required = children.len();
-        let mut child_elts = Vec::default();
-        while elts_required > 0 {
-            let Some(elt) = iter.next() else {
-                error!(
-                    "need {} children, but none left! vec looks like: {:?}",
-                    elts_required, child_elts
-                );
-                panic!();
-            };
-            elts_required += elt.children.len();
-            child_elts.push(elt);
-            elts_required -= 1;
-        }
-
-        props.render_children = Some((child_elts, children));
         let mut results = match template {
-            None => props.apply_children(commands, dui),
+            None => props.apply_children_inner(commands, dui, iter, children),
             Some(template) => {
                 let template = match &template {
                     PropValue::Literal(val) => val,
@@ -371,22 +373,32 @@ impl DuiNode {
                     }
                 }
 
-                let props_ref = if passthrough {
-                    props.extend(component_props);
-                    props
-                } else {
-                    component_props.render_children = props.render_children.take();
-                    &mut component_props
-                };
-
-                let mut res = component.render(commands, props_ref, dui)?;
-                if props_ref.render_children.is_some() {
-                    debug!(
-                        "adding {} children to component",
-                        props_ref.render_children.as_ref().unwrap().0.len()
-                    );
-                    res.extend(props_ref.apply_children(commands, dui)?);
+                let mut elts_required = children.len();
+                let mut child_elts = Vec::default();
+                while elts_required > 0 {
+                    let Some(elt) = iter.next() else {
+                        error!(
+                            "need {} children, but none left! vec looks like: {:?}",
+                            elts_required, child_elts
+                        );
+                        panic!();
+                    };
+                    elts_required += elt.children.len();
+                    child_elts.push(elt);
+                    elts_required -= 1;
                 }
+        
+                let prev_children_count = props.render_children.len();
+                props.render_children.push((child_elts, children));
+                debug!("[{:?} adding template children ({:?} sets)", commands.id(), props.render_children.len());
+                props.extend(component_props);
+                let mut res = component.render(commands, props, dui)?;
+                if props.render_children.len() == prev_children_count + 1 {
+                    let (elts, children) = props.render_children.pop().unwrap();
+                    debug!("adding {} children to component", children.len());
+                    res.extend(props.apply_children_inner(commands, dui, &mut elts.into_iter(), children)?);
+                }
+
                 Ok(res)
             }
         }?;
@@ -445,7 +457,8 @@ impl DuiRegistry {
         mut props: impl AsMut<DuiProps>,
     ) -> Result<DuiEntities, anyhow::Error> {
         debug!(
-            "applying template {template} with props: {:?}",
+            "[{:?}] applying template {template} with props: {:?}",
+            commands.id(),
             props.as_mut().props.keys()
         );
 
@@ -498,7 +511,6 @@ pub struct DuiElt {
     id: Option<String>,
     template: Option<PropValue>,
     properties: HashMap<String, PropValue>,
-    passthrough: bool,
     components: BTreeMap<TypeId, Box<dyn Reflect>>,
     prop_components: HashMap<PropComponent, String>,
     children: Vec<ChildType>,
@@ -510,7 +522,6 @@ impl Clone for DuiElt {
             id: self.id.clone(),
             template: self.template.clone(),
             properties: self.properties.clone(),
-            passthrough: self.passthrough,
             components: BTreeMap::from_iter(
                 self.components.iter().map(|(k, v)| (*k, v.clone_value())),
             ),
@@ -857,28 +868,27 @@ impl DuiLoader {
                             (None, ChildType::SpawnNew)
                         }
                         b"div" => {
-                            let mut elt = DuiElt {
-                                passthrough: true,
-                                ..Default::default()
-                            };
+                            let mut elt = DuiElt::default();
                             if matches!(ev, quick_xml::events::Event::Empty(_)) {
                                 Self::node_from_attrs(e, pos, asset_server, &mut elt, true)?
                             }
                             (Some(elt), ChildType::SpawnNew)
                         }
                         _ => {
-                            let (child_type, target_val) = if e.name().as_ref() == b"apply" {
-                                (
-                                    ChildType::ApplyToParent,
-                                    e.try_get_attribute("template")?
-                                        .ok_or(anyhow!(
-                                            "define-template must have a `template` attribute @ {pos}"
-                                        ))?
-                                        .value
-                                        .into_owned()
-                                )
-                            } else {
-                                (ChildType::SpawnNew, e.name().as_ref().to_owned())
+                            let (child_type, target_val) = match e.name().as_ref() {
+                                b"apply" => {
+                                    (
+                                        ChildType::ApplyToParent,
+                                        e.try_get_attribute("template")?
+                                            .ok_or(anyhow!(
+                                                "define-template must have a `template` attribute @ {pos}"
+                                            ))?
+                                            .value
+                                            .into_owned()
+                                    )
+                                } 
+                                b"apply-children" => (ChildType::ApplyToParent, b"apply-children".to_vec()),
+                                _ => (ChildType::SpawnNew, e.name().as_ref().to_owned()),
                             };
 
                             let target = if target_val.starts_with(b"@") {
@@ -910,13 +920,11 @@ impl DuiLoader {
                             let id = e
                                 .try_get_attribute("id")?
                                 .map(|attr| String::from_utf8_lossy(&attr.value).into_owned());
-                            let passthrough = e.try_get_attribute("passthrough")?.is_some();
                             (
                                 Some(DuiElt {
                                     id,
                                     template: Some(target),
                                     properties,
-                                    passthrough,
                                     ..Default::default()
                                 }),
                                 child_type,
