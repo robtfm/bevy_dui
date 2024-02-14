@@ -4,7 +4,7 @@ use bevy::{
     ecs::{
         component::Tick,
         reflect::ReflectCommandExt,
-        system::{CommandQueue, EntityCommands},
+        system::{CommandQueue, EntityCommands, SystemParam},
     },
     prelude::*,
     text::TextLayoutInfo,
@@ -94,11 +94,12 @@ impl DuiProps {
     /// returns Ok(None) if the key is not found.
     pub fn take<T: 'static>(&mut self, key: &str) -> Result<Option<T>, anyhow::Error> {
         self.props
-            .remove(key)
-            .map(|b| {
-                b.downcast()
-                    .map(|b| *b)
-                    .map_err(|_| anyhow!("property {key} is not of type {}", type_name::<T>()))
+            .remove_entry(key)
+            .map(|(k, b)| {
+                b.downcast().map(|b| *b).map_err(|b| {
+                    self.props.insert(k, b);
+                    anyhow!("property {key} is not of type {}", type_name::<T>())
+                })
             })
             .transpose()
     }
@@ -130,6 +131,7 @@ impl DuiProps {
 pub type NodeMap = HashMap<String, Entity>;
 
 /// root entity node and named nodes, returned from apply_template / spawn_template calls
+#[derive(Component, Clone)]
 pub struct DuiEntities {
     pub root: Entity,
     pub named_nodes: NodeMap,
@@ -148,7 +150,10 @@ impl DuiEntities {
     }
 
     pub fn named(&self, name: &str) -> Entity {
-        self.named_nodes[name]
+        self.named_nodes
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| panic!("no key {name}"))
     }
 }
 
@@ -458,7 +463,13 @@ impl<'a> DuiContext<'a> {
             .get(template)
             .ok_or(anyhow!("missing component registry for `{template}`"))?;
 
-        component.render(target, props, self)
+        let mut res = component.render(target, props, self)?;
+        res.insert("root".to_owned(), target.id());
+        target.insert(DuiEntities {
+            root: target.id(),
+            named_nodes: res.clone(),
+        });
+        Ok(res)
     }
 
     pub fn spawn_template(
@@ -507,6 +518,9 @@ impl DuiRegistry {
     ) {
         let name = name.into();
         debug!("added template {name}");
+        if self.templates.contains_key(&name) {
+            warn!("overwriting template {name}");
+        }
         self.templates.insert(name, Box::new(template));
     }
 
@@ -534,10 +548,14 @@ impl DuiRegistry {
             .ok_or(anyhow!("template `{template}` not found"))?
             .render(commands, props, &mut ctx)?;
 
-        Ok(DuiEntities {
+        let dui_entities = DuiEntities {
             root: commands.id(),
             named_nodes,
-        })
+        };
+
+        commands.insert(dui_entities.clone());
+
+        Ok(dui_entities)
     }
 
     pub fn set_default_prop<C: Clone + Send + Sync + 'static>(
@@ -986,15 +1004,19 @@ impl DuiLoader {
                             let id = e
                                 .try_get_attribute("id")?
                                 .map(|attr| String::from_utf8_lossy(&attr.value).into_owned());
-                            (
-                                Some(DuiElt {
-                                    id,
-                                    template: Some(target),
-                                    properties,
-                                    ..Default::default()
-                                }),
-                                child_type,
-                            )
+
+                            let mut elt = DuiElt {
+                                id,
+                                template: Some(target),
+                                properties,
+                                ..Default::default()
+                            };
+
+                            if matches!(ev, quick_xml::events::Event::Empty(_)) {
+                                Self::node_from_attrs(e, pos, asset_server, &mut elt, false)?
+                            };
+
+                            (Some(elt), child_type)
                         }
                     };
                     ensure!(!template.is_empty());
@@ -1162,7 +1184,8 @@ impl<'w, 's> DuiCommandsExt for Commands<'w, 's> {
         template: &str,
         props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
-        self.spawn_empty().apply_template(dui, template, props)
+        self.spawn(NodeBundle::default())
+            .apply_template(dui, template, props)
     }
 }
 
@@ -1173,7 +1196,7 @@ impl<'w, 's, 'a> DuiCommandsExt for ChildBuilder<'w, 's, 'a> {
         template: &str,
         props: DuiProps,
     ) -> Result<DuiEntities, anyhow::Error> {
-        let mut root = self.spawn_empty();
+        let mut root = self.spawn(NodeBundle::default());
         dui.apply_template(&mut root, template, props)
     }
 }
@@ -1274,5 +1297,37 @@ impl<C: Component + Default> DuiTemplate for DuiMarkerComponent<C> {
     ) -> Result<NodeMap, anyhow::Error> {
         commands.insert(C::default());
         Ok(Default::default())
+    }
+}
+
+#[derive(SystemParam)]
+pub struct DuiWalker<'w, 's> {
+    q: Query<'w, 's, &'static DuiEntities>,
+}
+
+impl<'w, 's> DuiWalker<'w, 's> {
+    pub fn walk(&self, from: Entity, path: impl Into<String>) -> Option<Entity> {
+        let path = path.into();
+
+        debug!("walking {path}");
+
+        let mut target = from;
+        for segment in path.split('.') {
+            let Ok(entities) = self.q.get(target) else {
+                debug!("no entities :(");
+                return None;
+            };
+            let Some(next) = entities.get_named(segment) else {
+                debug!(
+                    "failed to find segment {segment}, available names were: {:?}",
+                    entities.named_nodes.keys()
+                );
+                return None;
+            };
+            target = next;
+            debug!("  found segment {segment} -> {target:?}");
+        }
+
+        Some(target)
     }
 }
