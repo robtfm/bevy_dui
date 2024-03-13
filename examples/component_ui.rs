@@ -54,7 +54,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins((bevy_ecss::EcssPlugin::default(), DuiPlugin))
-        .add_state::<State>()
+        .init_state::<State>()
         .init_resource::<StateTracker<State>>()
         .add_systems(Startup, load_assets)
         .add_systems(Startup, register_components)

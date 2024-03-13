@@ -432,7 +432,8 @@ impl<'a> DuiContext<'a> {
         for child_type in &children {
             match child_type {
                 ChildType::SpawnNew => {
-                    let mut node = target.commands().spawn_empty();
+                    let mut new_commands = target.commands();
+                    let mut node = new_commands.spawn_empty();
                     debug!("[{:?}] spawned child [{:?}]", root_id, node.id());
                     let res = DuiNode::render_inner(&mut node, iter, props, self)?;
                     let id = node.id();
@@ -1189,7 +1190,7 @@ impl<'w, 's> DuiCommandsExt for Commands<'w, 's> {
     }
 }
 
-impl<'w, 's, 'a> DuiCommandsExt for ChildBuilder<'w, 's, 'a> {
+impl<'a> DuiCommandsExt for ChildBuilder<'a> {
     fn spawn_template(
         &mut self,
         dui: &DuiRegistry,
@@ -1210,7 +1211,7 @@ pub trait DuiEntityCommandsExt {
     ) -> Result<DuiEntities, anyhow::Error>;
 }
 
-impl<'w, 's, 'a> DuiCommandsExt for EntityCommands<'w, 's, 'a> {
+impl<'a> DuiCommandsExt for EntityCommands<'a> {
     fn spawn_template(
         &mut self,
         dui: &DuiRegistry,
@@ -1223,7 +1224,7 @@ impl<'w, 's, 'a> DuiCommandsExt for EntityCommands<'w, 's, 'a> {
     }
 }
 
-impl<'w, 's, 'a> DuiEntityCommandsExt for EntityCommands<'w, 's, 'a> {
+impl<'a> DuiEntityCommandsExt for EntityCommands<'a> {
     fn apply_template(
         &mut self,
         dui: &DuiRegistry,
